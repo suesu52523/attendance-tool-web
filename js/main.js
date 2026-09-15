@@ -39,7 +39,14 @@ const appState = {
   groupFailures: [],
   abnormalFailures: [],
 
+  // 重复填报检测（同工号 + 同一天 + 同一开始时间出现多次）
+  groupDuplicates: [],
+
   fileName: '',
+
+  // 输出页「调班记录」查看模式：'current' 只看本轮 / 'all' 累计全部
+  outputShiftView: 'current',
+
   isParsing: false,
 };
 
@@ -61,6 +68,8 @@ function createRound(roundNo) {
     shiftRecords: [],
     systemRecords: [],
     abnormalFailures: [], // 本轮异常匹配失败记录
+    abnormalWarnings: [], // 本轮异常匹配提醒（多条命中 / 姓名不一致）
+    locateIssues: [], // 本轮批量操作定位异常清单（未定位 / 多条命中）
     status: 'pending', // pending -> processing -> confirmed
     confirmedAt: null,
   };
@@ -351,6 +360,13 @@ function renderOpBadge(type) {
   return `<span class="badge ${cls}">${type}</span>`;
 }
 
+// 未导入文件时页面展示的是内置示例数据，明确标注避免误读为已导入的真实数据
+function renderDemoBadge(isDemo) {
+  return isDemo
+    ? '<span class="badge badge-warning">示例数据 · 未导入文件</span>'
+    : '';
+}
+
 // ==================== Excel 解析与工具函数 ====================
 
 function parseExcel(file) {
@@ -427,8 +443,8 @@ function toYYYYMMDD(dateVal) {
   if (!dateVal && dateVal !== 0) return '';
   const s = String(dateVal).trim();
   if (/^\d{8}$/.test(s)) return s;
-  // 2026-08-01 / 2026/08/01
-  const m = s.match(/(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+  // 2026-08-01 / 2026/08/01（必须整串匹配，避免 "2026/8/10x" 被截成合法日期）
+  const m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
   if (m) {
     return `${m[1]}${String(m[2]).padStart(2, '0')}${String(m[3]).padStart(2, '0')}`;
   }
@@ -447,7 +463,11 @@ function parseTimeParts(timeStr) {
   const t = normalizeTime(timeStr);
   const m = t.match(/(\d{1,2}):(\d{2})/);
   if (!m) return null;
-  return { h: parseInt(m[1], 10), m: parseInt(m[2], 10) };
+  const h = parseInt(m[1], 10);
+  const mi = parseInt(m[2], 10);
+  // 时/分超出范围视为非法时间（拦截 25:70、24:00 这类脏数据）
+  if (h > 23 || mi > 59) return null;
+  return { h, m: mi };
 }
 
 function computeHours(startDate, startTime, endDate, endTime) {
@@ -478,7 +498,7 @@ function parseDateParts(dateStr) {
   if (/^\d{8}$/.test(s)) {
     return { y: parseInt(s.slice(0, 4), 10), m: parseInt(s.slice(4, 6), 10), d: parseInt(s.slice(6, 8), 10) };
   }
-  const m = s.match(/(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+  const m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
   if (m) {
     return { y: parseInt(m[1], 10), m: parseInt(m[2], 10), d: parseInt(m[3], 10) };
   }
@@ -558,6 +578,86 @@ function computeHoursRaw(startDate, startTime, endDate, endTime) {
   );
 }
 
+// 业务键定位：工号 + 开始日期（+开始时间）
+// 返回全部候选记录，不做"取第一条"的隐式截断，由调用方决定如何处理多条命中
+// 注意：不依赖校对系统 ID（ID 与合并大表序号无关），避免改错/删错行
+function locateMergedRecords(empNo, startDate, startTime, records) {
+  const pool = records || appState.mergedRecords || [];
+  const no = String(empNo || '').trim();
+  if (!no) return [];
+
+  let candidates = pool.filter(r => String(r['工号']).trim() === no);
+  if (!candidates.length) return [];
+
+  const date = toYYYYMMDD(startDate);
+  if (date) {
+    const byDate = candidates.filter(r => toYYYYMMDD(r['加班开始日期']) === date);
+    if (!byDate.length) return [];
+    candidates = byDate;
+  }
+
+  // 提供了开始时间就必须匹配上（按 时:分 比较，兼容 15:45 / 15:45:00 / 8:15）
+  const time = padTime(startTime);
+  if (time) {
+    return candidates.filter(r => !!padTime(r['加班开始时间']) && padTime(r['加班开始时间']) === time);
+  }
+
+  // 未提供开始时间时保留同日全部候选，由调用方按"多条命中"提示人工确认
+  return candidates;
+}
+
+// 为一条整改操作定位合并大表中的目标记录
+// 定位优先级：① 业务键（工号 + 原开始日期 + 原开始时间） ② 回退：ID 等于系统序号
+// 返回 { target, method, hits, candidates }，target 为 null 表示未定位到
+function resolveOperationTarget(op) {
+  const byKey = locateMergedRecords(op['工号'], op['原开始日期'], op['原开始时间']);
+  if (byKey.length) return { target: byKey[0], method: '业务键', hits: byKey.length, candidates: byKey };
+
+  const id = String(op['系统序号'] === undefined || op['系统序号'] === null ? '' : op['系统序号']).trim();
+  if (id) {
+    const byId = appState.mergedRecords.filter(r => String(r['系统序号']) === id);
+    if (byId.length) return { target: byId[0], method: 'ID回退', hits: byId.length, candidates: byId };
+  }
+
+  return { target: null, method: '未定位', hits: 0, candidates: [] };
+}
+
+// 候选记录摘要：序号(班组) 前 5 条，超过 5 条补"等 N 条"，便于一眼看出重复数据来自哪些班组
+function describeCandidates(candidates) {
+  const list = candidates.slice(0, 5)
+    .map(r => `${r['系统序号']}${r['班组'] ? `(${r['班组']})` : ''}`)
+    .join('、');
+  return candidates.length > 5 ? `${list} 等 ${candidates.length} 条` : list;
+}
+
+// 多条命中时的辅助提示：若候选里恰好有一条的班组与异常表/整改表填写的科室(班组)一致，直接指出来
+function buildDeptHint(candidates, dept) {
+  const d = String(dept || '').trim();
+  if (!d) return '';
+  const same = candidates.filter(r => String(r['班组'] || '').trim() === d);
+  return same.length === 1
+    ? `；其中序号 ${same[0]['系统序号']}（${d}）与表里填写的科室/班组一致，建议优先核对这一条`
+    : '';
+}
+
+function buildLocateIssue(op, resolved, level, message) {
+  const candidates = (resolved && resolved.candidates) || [];
+  return {
+    级别: level,
+    系统序号: op['系统序号'],
+    校对ID: op['系统序号'] || '',
+    工号: op['工号'],
+    姓名: op['姓名'],
+    班组: op['班组'],
+    操作类型: op['操作类型'],
+    原开始日期: op['原开始日期'] || '',
+    原开始时间: op['原开始时间'] || '',
+    命中数: candidates.length,
+    候选序号: describeCandidates(candidates),
+    说明: message,
+  };
+}
+
 // ==================== 步骤 1：导入与合并 ====================
 
 function processGroupWorkbook(parsed) {
@@ -599,6 +699,13 @@ function processGroupWorkbook(parsed) {
 
     objs.forEach(({ raw, formatted }, idx) => {
       const rowNum = idx + 2; // Excel 行号
+
+      // 整行空白：Excel 里常见的空行，直接跳过（既不进合并表，也不计入校验失败）
+      const isBlankRow = Object.values(formatted).every(
+        v => String(v === undefined || v === null ? '' : v).trim() === ''
+      );
+      if (isBlankRow) return;
+
       const startDate = formatted['加班开始日期'];
       const startTime = normalizeTime(formatted['加班开始时间']);
       const endDate = formatted['加班结束日期'];
@@ -662,6 +769,27 @@ function processGroupWorkbook(parsed) {
 
   appState.mergedRecords = merged;
   appState.groupFailures = failures;
+
+  // 重复填报检测：同工号 + 同一天 + 同一开始时间出现多次
+  // 常见成因：同一个人被填进了多个班组 sheet，或同一条加班被重复抄录
+  // 这类重复会让后续异常/整改的定位出现"多条命中"，越早发现越好
+  const dupMap = new Map();
+  merged.forEach(r => {
+    const k = `${String(r['工号']).trim()}|${toYYYYMMDD(r['加班开始日期'])}|${padTime(r['加班开始时间'])}`;
+    if (!dupMap.has(k)) dupMap.set(k, []);
+    dupMap.get(k).push(r);
+  });
+  appState.groupDuplicates = [...dupMap.values()]
+    .filter(list => list.length > 1)
+    .map(list => ({
+      工号: list[0]['工号'],
+      姓名: list[0]['姓名'],
+      加班开始日期: list[0]['加班开始日期'],
+      加班开始时间: list[0]['加班开始时间'],
+      条数: list.length,
+      系统序号: list.map(r => r['系统序号']).join('、'),
+      班组: list.map(r => r['班组']).join('、'),
+    }));
   // 重新导入班组表后，之前的批量确认与最终生成状态失效
   appState.batchConfirmed = false;
   appState.finalGenerated = false;
@@ -682,6 +810,7 @@ function processAbnormalWorkbook(parsed) {
   round.abnormalWorkbook = parsed;
   const records = [];
   const failures = [];
+  const warnings = [];
 
   parsed.sheetNames.forEach(name => {
     const objs = sheetToObjects(parsed.sheets[name]);
@@ -696,32 +825,41 @@ function processAbnormalWorkbook(parsed) {
       rec['班组'] = rec['科室'] || '';
       rec['处置状态'] = '待处理';
 
-      // 匹配校验：按 工号 + 姓名 + 开始日期 在合并大表中定位
+      // 匹配校验：定位键 = 工号 + 开始日期（+开始时间，若异常表提供）
+      // 姓名不参与定位（异常表姓名可能少字/多字/空白），只在匹配后做一致性提醒
+      // 不做"取第一条"式静默匹配：0 条进失败清单，多条进提醒清单，均可在页面与导出文件中核对
       const empNo = String(rec['工号'] || '').trim();
-      const empName = rec['姓名'] || '';
-      const startDate = rec['开始日期'];
-      const matched = appState.mergedRecords.find(r => {
-        const sameEmp = String(r['工号']).trim() === empNo && String(r['姓名'] || '').trim() === String(empName).trim();
-        if (!sameEmp) return false;
-        const recDate = toYYYYMMDD(startDate);
-        const recStart = String(rec['开始时间'] || '').trim();
-        const matchDate = r['加班开始日期'] === recDate || r['加班开始日期'] === startDate || toYYYYMMDD(r['加班开始日期']) === recDate;
-        const matchTime = !recStart || padTime(r['加班开始时间']) === padTime(recStart);
-        return matchDate && matchTime;
-      });
+      const empName = String(rec['姓名'] || '').trim();
+      const hits = locateMergedRecords(empNo, rec['开始日期'], rec['开始时间']);
 
-      // 标记匹配结果：未匹配记录不进入整改表
-      rec['匹配状态'] = matched ? '已匹配' : '未匹配';
-      if (matched) rec['系统序号'] = matched['系统序号'];
-      records.push(rec);
+      rec['匹配状态'] = hits.length === 0
+        ? '未匹配'
+        : (hits.length > 1 ? `多条命中(${hits.length})` : '已匹配');
 
-      if (!matched) {
+      if (!hits.length) {
         failures.push({
           ...rec,
           行号: idx + 2,
-          失败原因: '无法在合并大表中匹配到对应记录（请核对工号、姓名、开始日期/时间）',
+          失败原因: '无法在合并大表中匹配到对应记录（请核对工号、开始日期/时间）',
         });
+      } else {
+        rec['系统序号'] = hits[0]['系统序号'];
+        if (hits.length > 1) {
+          warnings.push({
+            ...rec,
+            行号: idx + 2,
+            定位提醒: `合并大表中存在 ${hits.length} 条同工号同日期记录：${describeCandidates(hits)}，已暂按序号 ${hits[0]['系统序号']} 处理${buildDeptHint(hits, rec['科室'])}。若是同一条加班被重复填报到多个班组（一个人只应属于一个班组），请先清理合并大表；若确实是同一天两次加班，请在异常表补填「开始时间」以便唯一定位`,
+          });
+        }
+        if (empName && String(hits[0]['姓名'] || '').trim() !== empName) {
+          warnings.push({
+            ...rec,
+            行号: idx + 2,
+            定位提醒: `工号 ${empNo} 在合并大表中的姓名为「${hits[0]['姓名']}」，与异常表填写的「${empName}」不一致，请核对（已按工号+日期+时间匹配成功）`,
+          });
+        }
       }
+      records.push(rec);
     });
   });
 
@@ -729,6 +867,7 @@ function processAbnormalWorkbook(parsed) {
   appState.abnormalFailures = failures;
   round.abnormalRecords = records;
   round.abnormalFailures = failures;
+  round.abnormalWarnings = warnings;
   round.status = 'processing';
   // 重新导入异常表后，之前的批量确认与最终生成状态失效
   appState.batchConfirmed = false;
@@ -782,6 +921,12 @@ function processRectifyWorkbook(parsed) {
         操作详情: detail,
         备注: obj['特殊情况说明'] || '',
         roundNo: round.roundNo,
+        // 定位键：整改表自带的原始加班信息（不依赖校对系统 ID）
+        原开始日期: obj['开始日期'] || '',
+        原开始时间: obj['开始时间'] || '',
+        原结束日期: obj['结束日期'] || '',
+        原结束时间: obj['结束时间'] || '',
+        定位状态: '待定位',
         // 修改后的字段，用于 applyBatchOperations 更新合并大表
         修改后开始日期: obj['修改后开始日期'] || '',
         修改后开始时间: obj['修改后开始时间'] || '',
@@ -956,9 +1101,30 @@ function renderImport() {
   const sheets = appState.groupSheets.length ? appState.groupSheets : demoSheets.map(s => ({ ...s, status: 'ok' }));
   const records = appState.mergedRecords.length ? appState.mergedRecords : demoRecords;
   const hasFile = !!appState.groupWorkbook;
+  const isDemo = !hasFile;
   const failureCount = appState.groupFailures.length;
+  const duplicates = appState.groupDuplicates || [];
 
   return `
+    ${duplicates.length ? `<div class="mb-6 rounded-3xl p-6 bg-apple-orange/5 border border-apple-orange/20">
+      <div class="flex items-start justify-between gap-4">
+        <div class="flex items-start gap-3 text-sm text-apple-orange">
+          <i class="ph ph-warning-circle mt-0.5 text-lg"></i>
+          <div>
+            <div class="font-medium">发现 ${duplicates.length} 组重复填报：同一工号同一天同一开始时间有多条记录</div>
+            <div class="text-apple-muted mt-1">
+              常见原因是同一个人被填进了多个班组（一个人只能属于一个班组），或同一条加班被重复抄录。
+              这类重复会让后续「异常处理 / 整改」按工号+日期+时间定位时出现「多条命中」而需要人工核对，建议先在班组填报表里核对并清理。
+            </div>
+            <div class="mt-2 space-y-1">
+              ${duplicates.slice(0, 3).map(d => `<div class="text-xs text-apple-muted">· ${d['工号']} ${d['姓名']} ${d['加班开始日期']} ${d['加班开始时间']}：共 ${d['条数']} 条（班组：${d['班组']}）</div>`).join('')}
+              ${duplicates.length > 3 ? `<div class="text-xs text-apple-muted">· 共 ${duplicates.length} 组，其余见下载清单</div>` : ''}
+            </div>
+          </div>
+        </div>
+        <button onclick="exportGroupDuplicates()" class="h-9 px-4 rounded-full bg-apple-orange/10 text-apple-orange text-xs font-medium hover:bg-apple-orange/20 transition-colors shrink-0">下载清单</button>
+      </div>
+    </div>` : ''}
     <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
       <div class="xl:col-span-1 space-y-6">
         <div class="bg-apple-card rounded-3xl p-8 shadow-card">
@@ -988,6 +1154,12 @@ function renderImport() {
                   下载校验失败记录 (${failureCount})
                 </button>
               ` : ''}
+              ${duplicates.length > 0 ? `
+                <button onclick="exportGroupDuplicates()" class="w-full h-11 rounded-full bg-apple-orange/10 text-apple-orange text-sm font-medium hover:bg-apple-orange/20 transition-colors inline-flex items-center justify-center gap-2">
+                  <i class="ph ph-copy"></i>
+                  下载重复填报清单 (${duplicates.length})
+                </button>
+              ` : ''}
             </div>
           ` : ''}
 
@@ -1012,6 +1184,10 @@ function renderImport() {
               <span class="text-apple-muted">需核对</span>
               <span class="font-medium text-apple-orange">${sheets.filter(s => s.status === 'warning').length} 个</span>
             </div>
+            <div class="flex items-center justify-between text-sm">
+              <span class="text-apple-muted">重复填报</span>
+              <span class="font-medium ${duplicates.length ? 'text-apple-red' : 'text-apple-green'}">${duplicates.length} 组</span>
+            </div>
           </div>
         </div>
       </div>
@@ -1020,10 +1196,13 @@ function renderImport() {
         <div class="bg-apple-card rounded-3xl p-8 shadow-card">
           <div class="flex items-center justify-between mb-6">
             <h3 class="text-xl font-semibold tracking-tight">Sheet 识别预览</h3>
-            <a href="templates/班组填报表模板.xlsx" download class="h-9 px-4 rounded-full bg-apple-gray text-sm font-medium hover:bg-gray-200 transition-colors inline-flex items-center gap-2">
-              <i class="ph ph-download-simple"></i>
-              空白模板
-            </a>
+            <div class="flex items-center gap-2">
+              ${renderDemoBadge(isDemo)}
+              <a href="templates/班组填报表模板.xlsx" download class="h-9 px-4 rounded-full bg-apple-gray text-sm font-medium hover:bg-gray-200 transition-colors inline-flex items-center gap-2">
+                <i class="ph ph-download-simple"></i>
+                空白模板
+              </a>
+            </div>
           </div>
           <div class="overflow-hidden rounded-2xl border border-apple-border">
             <table class="data-table bg-white">
@@ -1052,7 +1231,7 @@ function renderImport() {
         <div class="bg-apple-card rounded-3xl p-8 shadow-card">
           <div class="flex items-center justify-between mb-6">
             <h3 class="text-xl font-semibold tracking-tight">合并大表预览</h3>
-            <span class="text-sm text-apple-muted">前 20 条</span>
+            ${isDemo ? renderDemoBadge(true) : '<span class="text-sm text-apple-muted">前 20 条</span>'}
           </div>
           <div class="overflow-hidden rounded-2xl border border-apple-border">
             ${renderTable(records)}
@@ -1067,9 +1246,34 @@ function renderAbnormal() {
   const round = getCurrentRound();
   const records = appState.abnormalRecords.length ? appState.abnormalRecords : demoAbnormal;
   const hasFile = !!appState.abnormalWorkbook;
+  const isDemo = !hasFile;
   const failureCount = (round.abnormalFailures || appState.abnormalFailures || []).length;
+  const warnings = round.abnormalWarnings || [];
+  const noMerged = !appState.mergedRecords.length;
 
   return `
+    ${noMerged ? `<div class="mb-6 rounded-3xl p-6 bg-apple-red/5 border border-apple-red/20">
+      <div class="flex items-start gap-3 text-sm text-apple-red">
+        <i class="ph ph-warning-circle mt-0.5 text-lg"></i>
+        <div>
+          <div class="font-medium">尚未导入班组填报表</div>
+          <div class="text-apple-muted mt-1">异常记录需要在「合并大表」中按工号+日期+时间定位对应加班记录。请先完成「导入与合并」，再回到本步骤，否则所有记录都会显示为匹配失败。</div>
+          <button onclick="goToStep(1)" class="mt-3 h-9 px-4 rounded-full bg-apple-blue text-white text-xs font-medium hover:bg-apple-blue-hover transition-colors">返回步骤 2 导入班组合并</button>
+        </div>
+      </div>
+    </div>` : ''}
+    ${warnings.length ? `<div class="mb-6 rounded-3xl p-6 bg-apple-orange/5 border border-apple-orange/20">
+      <div class="flex items-start justify-between gap-4">
+        <div class="flex items-start gap-3 text-sm text-apple-orange">
+          <i class="ph ph-info mt-0.5 text-lg"></i>
+          <div>
+            <div class="font-medium">有 ${warnings.length} 条记录需要人工核对</div>
+            <div class="text-apple-muted mt-1">存在同一工号同一天多条加班（已暂按第一条定位），或异常表姓名与合并大表不一致。请在下方「异常记录清单」核对「系统序号 / 匹配状态」两列，必要时下载清单交由组长确认。</div>
+          </div>
+        </div>
+        <button onclick="exportAbnormalWarnings()" class="h-9 px-4 rounded-full bg-apple-orange/10 text-apple-orange text-xs font-medium hover:bg-apple-orange/20 transition-colors shrink-0">下载定位提醒</button>
+      </div>
+    </div>` : ''}
     <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
       <div class="xl:col-span-1 space-y-6">
         <div class="bg-apple-card rounded-3xl p-8 shadow-card">
@@ -1102,6 +1306,12 @@ function renderAbnormal() {
                   下载匹配失败记录 (${failureCount})
                 </button>
               ` : ''}
+              ${warnings.length > 0 ? `
+                <button onclick="exportAbnormalWarnings()" class="w-full h-11 rounded-full bg-apple-orange/10 text-apple-orange text-sm font-medium hover:bg-apple-orange/20 transition-colors inline-flex items-center justify-center gap-2">
+                  <i class="ph ph-info"></i>
+                  下载定位提醒 (${warnings.length})
+                </button>
+              ` : ''}
             </div>
           ` : ''}
 
@@ -1126,6 +1336,10 @@ function renderAbnormal() {
               <span class="text-sm text-apple-muted">匹配失败</span>
               <span class="font-semibold text-apple-red">${failureCount}</span>
             </div>
+            <div class="flex items-center justify-between p-3 rounded-xl bg-apple-gray/50">
+              <span class="text-sm text-apple-muted">需人工核对</span>
+              <span class="font-semibold text-apple-orange">${warnings.length}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -1134,7 +1348,10 @@ function renderAbnormal() {
         <div class="bg-apple-card rounded-3xl p-8 shadow-card">
           <div class="flex items-center justify-between mb-6">
             <h3 class="text-xl font-semibold tracking-tight">异常记录清单</h3>
-            <button class="h-9 px-4 rounded-full bg-apple-orange/10 text-apple-orange text-sm font-medium hover:bg-apple-orange/20 transition-colors">${records.length} 条待处理</button>
+            <div class="flex items-center gap-2">
+              ${renderDemoBadge(isDemo)}
+              <button class="h-9 px-4 rounded-full bg-apple-orange/10 text-apple-orange text-sm font-medium hover:bg-apple-orange/20 transition-colors">${records.length} 条待处理</button>
+            </div>
           </div>
           <div class="overflow-hidden rounded-2xl border border-apple-border">
             ${renderTable(records)}
@@ -1163,6 +1380,8 @@ function renderRectify() {
   const round = getCurrentRound();
   const operations = appState.rectifyOperations.length ? appState.rectifyOperations : demoOperations;
   const hasFile = !!appState.rectifyWorkbook;
+  const isDemo = !hasFile;
+  const locateIssues = round.locateIssues || [];
   const stats = { 修改: 0, 删除: 0, 调班: 0, 特殊情况: 0, 未填写: 0 };
   operations.forEach(op => {
     const t = op['操作类型'];
@@ -1221,6 +1440,33 @@ function renderRectify() {
         </div>
 
         <div class="bg-apple-card rounded-3xl p-8 shadow-card">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold tracking-tight">批量操作定位结果</h3>
+            ${round.status === 'confirmed'
+              ? (locateIssues.length ? '<span class="badge badge-warning">需人工核对</span>' : '<span class="badge badge-success">全部定位成功</span>')
+              : '<span class="badge badge-muted">待确认执行</span>'}
+          </div>
+          ${round.status !== 'confirmed'
+            ? '<div class="text-sm text-apple-muted">尚未执行批量操作。点击上方「确认执行」后，这里会显示每条改动的定位结果。</div>'
+            : (locateIssues.length
+              ? `<div class="space-y-3">
+                  <div class="text-sm text-apple-red">有 ${locateIssues.length} 条操作未执行或未能唯一确定目标行（含无法识别的处置方式），请人工核对后再使用导出文件：</div>
+                  ${locateIssues.slice(0, 5).map(i => `
+                    <div class="p-3 rounded-2xl bg-apple-red/5 border border-apple-red/10 text-xs">
+                      <div class="font-medium text-apple-red">${i['级别']} · ${i['操作类型']} · 工号 ${i['工号']} ${i['姓名']}</div>
+                      <div class="text-apple-muted mt-1">${i['说明']}</div>
+                    </div>
+                  `).join('')}
+                  ${locateIssues.length > 5 ? `<div class="text-xs text-apple-muted">共 ${locateIssues.length} 条，仅显示前 5 条</div>` : ''}
+                  <button onclick="exportLocateIssues()" class="w-full h-10 rounded-full bg-apple-red/10 text-apple-red text-sm font-medium hover:bg-apple-red/20 transition-colors inline-flex items-center justify-center gap-2">
+                    <i class="ph ph-download-simple"></i>
+                    下载定位异常清单 (${locateIssues.length})
+                  </button>
+                </div>`
+              : '<div class="flex items-start gap-2 text-sm text-apple-green"><i class="ph ph-check-circle mt-0.5"></i><span>全部操作均已按「工号 + 开始日期 + 开始时间」唯一定位并执行。</span></div>')}
+        </div>
+
+        <div class="bg-apple-card rounded-3xl p-8 shadow-card">
           <h3 class="text-lg font-semibold mb-4 tracking-tight">操作统计</h3>
           <div class="grid grid-cols-2 gap-3">
             <div class="p-4 rounded-2xl bg-apple-gray/50 text-center">
@@ -1251,7 +1497,7 @@ function renderRectify() {
         <div class="bg-apple-card rounded-3xl p-8 shadow-card">
           <div class="flex items-center justify-between mb-6">
             <h3 class="text-xl font-semibold tracking-tight">待执行操作预览</h3>
-            <span class="text-sm text-apple-muted">前 20 条</span>
+            ${isDemo ? renderDemoBadge(true) : '<span class="text-sm text-apple-muted">前 20 条</span>'}
           </div>
           <div class="overflow-hidden rounded-2xl border border-apple-border">
             ${renderTable(operations)}
@@ -1290,7 +1536,8 @@ function renderRectify() {
 function renderOutput() {
   const round = getCurrentRound();
   const confirmed = appState.batchConfirmed && round.status === 'confirmed';
-  const total = appState.mergedRecords.length || demoRecords.length;
+  const isDemo = !round.rectifyOperations.length && !appState.rectifyOperations.length;
+  const locateIssues = round.locateIssues || [];
 
   // 当前轮次统计
   const currentOps = round.rectifyOperations.length ? round.rectifyOperations : (appState.rectifyOperations.length ? appState.rectifyOperations : demoOperations);
@@ -1484,11 +1731,40 @@ function renderOutput() {
               </div>
             </div>`}
 
+        <!-- 定位异常提示：批量操作未能唯一确定目标行的记录 -->
+        ${confirmed && locateIssues.length ? `
+        <div class="bg-apple-card rounded-3xl p-8 shadow-card border border-apple-red/20">
+          <div class="flex items-start justify-between gap-4 mb-4">
+            <div class="flex items-start gap-3">
+              <div class="w-10 h-10 rounded-xl bg-apple-red/10 text-apple-red flex items-center justify-center shrink-0">
+                <i class="ph ph-warning-octagon text-lg"></i>
+              </div>
+              <div>
+                <h3 class="text-lg font-semibold tracking-tight">有 ${locateIssues.length} 条操作未执行或需人工核对</h3>
+                <p class="text-sm text-apple-muted mt-0.5">这些改动可能未生效或作用于错误行，请核对后再使用导出文件。</p>
+              </div>
+            </div>
+            <button onclick="exportLocateIssues()" class="h-9 px-4 rounded-full bg-apple-red/10 text-apple-red text-xs font-medium hover:bg-apple-red/20 transition-colors shrink-0">
+              下载清单
+            </button>
+          </div>
+          <div class="space-y-2">
+            ${locateIssues.slice(0, 5).map(i => `
+              <div class="p-3 rounded-2xl bg-apple-red/5 text-xs">
+                <div class="font-medium text-apple-red">${i['级别']} · ${i['操作类型']} · 工号 ${i['工号']} ${i['姓名']}（校对ID ${i['校对ID'] || '-'}）</div>
+                <div class="text-apple-muted mt-1">${i['说明']}</div>
+              </div>
+            `).join('')}
+            ${locateIssues.length > 5 ? `<div class="text-xs text-apple-muted">共 ${locateIssues.length} 条，仅显示前 5 条</div>` : ''}
+          </div>
+        </div>` : ''}
+
         <!-- 操作执行记录 -->
         <div class="bg-apple-card rounded-3xl p-8 shadow-card">
           <div class="flex items-center justify-between mb-6">
             <h3 class="text-xl font-semibold tracking-tight">操作执行记录</h3>
             <div class="flex items-center gap-2">
+              ${renderDemoBadge(isDemo)}
               <button onclick="setOutputShiftView('current')" class="h-9 px-4 rounded-full ${viewShiftMode === 'current' ? 'bg-apple-blue/10 text-apple-blue' : 'bg-apple-gray text-apple-muted hover:text-apple-text'} text-sm font-medium transition-colors">只看本轮</button>
               <button onclick="setOutputShiftView('all')" class="h-9 px-4 rounded-full ${viewShiftMode === 'all' ? 'bg-apple-blue/10 text-apple-blue' : 'bg-apple-gray text-apple-muted hover:text-apple-text'} text-sm font-medium transition-colors">累计全部</button>
             </div>
@@ -1523,6 +1799,7 @@ function switchRound(index) {
   appState.rectifyOperations = round ? round.rectifyOperations : [];
   appState.abnormalWorkbook = round ? round.abnormalWorkbook : null;
   appState.rectifyWorkbook = round ? round.rectifyWorkbook : null;
+  appState.abnormalFailures = round ? (round.abnormalFailures || []) : [];
   appState.batchConfirmed = round ? round.status === 'confirmed' : false;
   renderContent();
 }
@@ -1552,7 +1829,20 @@ function getOpBadgeClass(type) {
 // 步骤4：确认执行批量操作，之后步骤5的最终输出文件才视为已生成
 function confirmBatch() {
   const round = getCurrentRound();
-  const ops = appState.rectifyOperations.length ? appState.rectifyOperations : demoOperations;
+  // 本轮已执行过：必须禁止重复执行
+  // 合并大表在删除后会重新编排序号，重复执行同一份整改表会按旧 ID 改到/删掉别人的记录
+  if (round.status === 'confirmed' || appState.batchConfirmed) {
+    showToast('本轮批量操作已执行过，不能重复执行。如需重做，请先点「开始新一轮处理」并重新导入整改表', 'error');
+    return;
+  }
+
+  // 没有导入整改表时不允许执行（避免把页面上的示例操作当成真实操作执行）
+  if (!appState.rectifyOperations.length) {
+    showToast('尚未导入整改表，请先导入组长填好并发回的文件', 'error');
+    return;
+  }
+
+  const ops = appState.rectifyOperations;
 
   // 存在未填写处置方式的记录时，阻止执行并提示补充
   const unfilled = ops.filter(o => o['操作类型'] === '未填写').length;
@@ -1562,7 +1852,9 @@ function confirmBatch() {
   }
 
   // 执行实际的批量操作：修改/删除/调班
-  applyBatchOperations(ops);
+  // 未定位/多条命中的操作不再静默跳过，而是进入本轮定位异常清单
+  const result = applyBatchOperations(ops);
+  round.locateIssues = result.issues;
 
   // 生成本轮处理后的系统数据快照
   round.systemRecords = buildSystemRecords(appState.mergedRecords);
@@ -1574,45 +1866,106 @@ function confirmBatch() {
   round.confirmedAt = new Date().toISOString();
   appState.batchConfirmed = true;
 
-  showToast(`第 ${round.roundNo} 轮批量操作已执行，正在生成输出文件`, 'success');
+  if (result.issues.length) {
+    showToast(`第 ${round.roundNo} 轮已执行，但有 ${result.issues.length} 条操作未能唯一定位，请在「输出与审计」核对并下载定位异常清单`, 'warning');
+  } else {
+    showToast(`第 ${round.roundNo} 轮批量操作已执行，正在生成输出文件`, 'success');
+  }
   goToStep(4);
 }
 
 // 将整改操作应用到合并大表
+// 定位优先级：① 业务键（工号 + 原开始日期 + 原开始时间） ② 回退：ID 等于系统序号
+// 返回 { applied, issues }；未定位/多条命中的操作会记录到 issues，不再静默跳过
 function applyBatchOperations(operations) {
-  if (!appState.mergedRecords.length) return;
+  const issues = [];
+  const needLocate = operations.filter(o => o['操作类型'] === '修改' || o['操作类型'] === '删除' || o['操作类型'] === '调班');
+
+  if (!appState.mergedRecords.length) {
+    needLocate.forEach(op => {
+      op['定位状态'] = '未定位';
+      issues.push(buildLocateIssue(op, null, '未定位', '合并大表为空，操作未执行。请先完成步骤 2 的导入与合并'));
+    });
+    return { applied: 0, issues };
+  }
 
   // 先处理修改，再处理删除/调班
   const modifyOps = operations.filter(o => o['操作类型'] === '修改');
   const removeOps = operations.filter(o => o['操作类型'] === '删除' || o['操作类型'] === '调班');
 
   modifyOps.forEach(op => {
-    const target = appState.mergedRecords.find(r => String(r['系统序号']) === String(op['系统序号']));
-    if (target) {
-      const startDate = normalizeDate(op['修改后开始日期']);
-      const startTime = normalizeTime(op['修改后开始时间']);
-      const endDate = normalizeDate(op['修改后结束日期']);
-      const endTime = normalizeTime(op['修改后结束时间']);
-      let hours = op['修改后上报加班时数'];
-      if ((hours === '' || hours === undefined || hours === null) && startDate && startTime && endDate && endTime) {
-        hours = computeHours(startDate, startTime, endDate, endTime);
-      }
-      if (startDate) target['加班开始日期'] = startDate;
-      if (startTime) target['加班开始时间'] = startTime;
-      if (endDate) target['加班结束日期'] = endDate;
-      if (endTime) target['加班结束时间'] = endTime;
-      if (hours !== '' && hours !== undefined && hours !== null) target['加班时数'] = hours;
-      target['操作标记'] = `第 ${op.roundNo || appState.currentRound + 1} 轮修改`;
+    const resolved = resolveOperationTarget(op);
+    if (!resolved.target) {
+      op['定位状态'] = '未定位';
+      issues.push(buildLocateIssue(op, resolved, '未定位', '合并大表中找不到该条加班记录（工号+开始日期+开始时间），修改未执行。请核对该行原始信息，或确认该记录是否已被本批次前一条操作改动'));
+      return;
     }
+    if (resolved.hits > 1) {
+      op['定位状态'] = `多条命中(${resolved.hits})`;
+      issues.push(buildLocateIssue(op, resolved, '多条命中',
+        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，修改仅作用于序号 ${resolved.target['系统序号']}，请人工确认${buildDeptHint(resolved.candidates, op['班组'])}`));
+    } else {
+      op['定位状态'] = `已定位(${resolved.method})`;
+    }
+
+    const target = resolved.target;
+    const startDate = normalizeDate(op['修改后开始日期']);
+    const startTime = normalizeTime(op['修改后开始时间']);
+    const endDate = normalizeDate(op['修改后结束日期']);
+    const endTime = normalizeTime(op['修改后结束时间']);
+    let hours = op['修改后上报加班时数'];
+    if ((hours === '' || hours === undefined || hours === null) && startDate && startTime && endDate && endTime) {
+      hours = computeHours(startDate, startTime, endDate, endTime);
+    }
+    if (startDate) target['加班开始日期'] = startDate;
+    if (startTime) target['加班开始时间'] = startTime;
+    if (endDate) target['加班结束日期'] = endDate;
+    if (endTime) target['加班结束时间'] = endTime;
+    if (hours !== '' && hours !== undefined && hours !== null) target['加班时数'] = hours;
+    target['操作标记'] = `第 ${op.roundNo || appState.currentRound + 1} 轮修改`;
   });
 
-  const removeIds = new Set(removeOps.map(op => String(op['系统序号'])));
-  appState.mergedRecords = appState.mergedRecords.filter(r => !removeIds.has(String(r['系统序号'])));
-
-  // 重新编排序号
-  appState.mergedRecords.forEach((r, idx) => {
-    r['系统序号'] = idx + 1;
+  const removeTargets = new Set();
+  removeOps.forEach(op => {
+    const resolved = resolveOperationTarget(op);
+    if (!resolved.target) {
+      op['定位状态'] = '未定位';
+      issues.push(buildLocateIssue(op, resolved, '未定位', `合并大表中找不到该条加班记录（工号+开始日期+开始时间），${op['操作类型']}未执行。请核对该行原始信息，或确认该记录是否已被本批次前一条操作改动`));
+      return;
+    }
+    if (resolved.hits > 1) {
+      op['定位状态'] = `多条命中(${resolved.hits})`;
+      issues.push(buildLocateIssue(op, resolved, '多条命中',
+        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，仅对序号 ${resolved.target['系统序号']} 执行${op['操作类型']}，请人工确认${buildDeptHint(resolved.candidates, op['班组'])}`));
+    } else {
+      op['定位状态'] = `已定位(${resolved.method})`;
+    }
+    removeTargets.add(resolved.target);
   });
+
+  if (removeTargets.size) {
+    appState.mergedRecords = appState.mergedRecords.filter(r => !removeTargets.has(r));
+    // 重新编排序号
+    appState.mergedRecords.forEach((r, idx) => {
+      r['系统序号'] = idx + 1;
+    });
+  }
+
+  // 特殊情况不涉及合并大表
+  operations.forEach(op => {
+    if (op['操作类型'] === '特殊情况') op['定位状态'] = '无需定位';
+  });
+
+  // 无法识别的处置方式（组长写的自由文本，如"删除加班""已改""已调"）不再静默忽略
+  const KNOWN_OPS = ['修改', '删除', '调班', '特殊情况', '未填写'];
+  operations.forEach(op => {
+    if (KNOWN_OPS.includes(op['操作类型'])) return;
+    op['定位状态'] = '未识别';
+    issues.push(buildLocateIssue(op, null, '未识别',
+      `处置方式「${op['操作类型']}」无法识别，未执行。请在整改表里改成 修改 / 删除 / 调班 / 不处理 之一后重新导入`));
+  });
+
+  return { applied: operations.length, issues };
 }
 
 // 根据合并大表构建系统输出格式的记录
@@ -1673,6 +2026,7 @@ function startNewRound() {
   appState.currentRound = 0;
   appState.groupFailures = [];
   appState.abnormalFailures = [];
+  appState.groupDuplicates = [];
   appState.fileName = '';
   updateStats();
   goToStep(0);
@@ -1698,15 +2052,19 @@ function downloadWorkbook(wb, filename) {
 // mode: 'current' 导出本轮处理后的汇总；'final' 导出全部处理后的最终汇总
 function exportSystemData(mode = 'current') {
   const round = getCurrentRound();
+  if (!appState.mergedRecords.length) {
+    showToast('暂无数据，请先导入班组填报表', 'error');
+    return false;
+  }
   let records;
   let filename;
 
   if (mode === 'final') {
-    records = appState.mergedRecords.length ? appState.mergedRecords : demoRecords;
+    records = appState.mergedRecords;
     filename = '总装科月度加班汇总_最终.xlsx';
   } else if (mode === 'merged') {
     // 步骤2：直接导出当前合并大表，尚未经过任何异常处理
-    records = appState.mergedRecords.length ? appState.mergedRecords : demoRecords;
+    records = appState.mergedRecords;
     filename = '总装科月度加班汇总_合并大表.xlsx';
   } else {
     records = round.systemRecords.length
@@ -1720,7 +2078,7 @@ function exportSystemData(mode = 'current') {
           加班时数: r['定额量'],
           加班原因: r['加班原因'],
         }))
-      : (appState.mergedRecords.length ? appState.mergedRecords : demoRecords);
+      : appState.mergedRecords;
     filename = `总装科月度加班汇总_第${round.roundNo}轮.xlsx`;
   }
 
@@ -1764,12 +2122,16 @@ function exportMergedAndContinue() {
 }
 
 function exportRectify() {
-  const allRecords = appState.abnormalRecords.length ? appState.abnormalRecords : demoAbnormal;
+  if (!appState.abnormalRecords.length) {
+    showToast('尚无异常记录，请先导入异常表', 'error');
+    return false;
+  }
+  const allRecords = appState.abnormalRecords;
   // 匹配失败的记录没有对应系统序号，无法执行整改，不进入整改表
   const records = allRecords.filter(r => r['匹配状态'] !== '未匹配');
   const excluded = allRecords.length - records.length;
   if (excluded > 0) {
-    showToast(`已排除 ${excluded} 条匹配失败记录，整改表仅包含匹配成功的记录`, 'warning');
+    showToast(`已排除 ${excluded} 条匹配失败记录（明细见「下载匹配失败记录」按钮），整改表仅包含匹配成功的记录`, 'warning');
   }
   // 按班组/科室分组
   const groups = {};
@@ -1809,8 +2171,13 @@ function exportShiftData(mode = 'current') {
     const round = getCurrentRound();
     shiftRecords = round.shiftRecords.length
       ? round.shiftRecords
-      : buildShiftRecords((appState.rectifyOperations.length ? appState.rectifyOperations : demoOperations).filter(o => o['操作类型'] === '调班'));
+      : buildShiftRecords(appState.rectifyOperations.filter(o => o['操作类型'] === '调班'));
     filename = `调班数据导入模板_第${round.roundNo}轮.xlsx`;
+  }
+
+  if (!shiftRecords.length) {
+    showToast(mode === 'final' ? '暂无累计调班记录' : '本轮没有调班记录', 'error');
+    return false;
   }
 
   const mainRows = [];
@@ -1865,7 +2232,11 @@ function exportShiftData(mode = 'current') {
 }
 
 function exportOperationLog() {
-  const ops = getAllOperations().length ? getAllOperations() : demoOperations;
+  const ops = getAllOperations();
+  if (!ops.length) {
+    showToast('暂无操作记录，请先执行批量操作', 'error');
+    return false;
+  }
   const headers = ['轮次', '系统序号', '工号', '姓名', '班组', '操作类型', '操作详情', '备注'];
   const rows = ops.map(op => [
     op['roundNo'] || 1, op['系统序号'], op['工号'], op['姓名'], op['班组'], op['操作类型'], op['操作详情'], op['备注'] || ''
@@ -1902,6 +2273,20 @@ function exportGroupFailures() {
   downloadWorkbook(wb, '班组填报校验失败记录.xlsx');
 }
 
+// 导出重复填报清单（同工号 + 同一天 + 同一开始时间出现多次）
+function exportGroupDuplicates() {
+  const duplicates = appState.groupDuplicates || [];
+  if (!duplicates.length) {
+    showToast('暂无重复填报记录', 'info');
+    return;
+  }
+  const headers = ['工号', '姓名', '加班开始日期', '加班开始时间', '条数', '系统序号', '班组'];
+  const rows = duplicates.map(d => headers.map(h => d[h] !== undefined ? d[h] : ''));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([headers, ...rows]), '重复填报记录');
+  downloadWorkbook(wb, '班组填报重复记录.xlsx');
+}
+
 // 导出异常处理步骤的匹配失败记录
 function exportAbnormalFailures() {
   const round = getCurrentRound();
@@ -1915,6 +2300,36 @@ function exportAbnormalFailures() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([headers, ...rows]), '匹配失败记录');
   downloadWorkbook(wb, '异常匹配失败记录.xlsx');
+}
+
+// 导出异常处理步骤的定位提醒（多条命中 / 姓名不一致）
+function exportAbnormalWarnings() {
+  const round = getCurrentRound();
+  const warnings = round.abnormalWarnings || [];
+  if (!warnings.length) {
+    showToast('暂无定位提醒', 'info');
+    return;
+  }
+  const headers = [...ABNORMAL_HEADERS, '行号', '定位提醒'];
+  const rows = warnings.map(w => headers.map(h => w[h] !== undefined ? w[h] : ''));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([headers, ...rows]), '定位提醒');
+  downloadWorkbook(wb, '异常定位提醒.xlsx');
+}
+
+// 导出批量操作的定位异常清单（未定位 / 多条命中）
+function exportLocateIssues() {
+  const round = getCurrentRound();
+  const issues = round.locateIssues || [];
+  if (!issues.length) {
+    showToast('暂无定位异常记录', 'info');
+    return;
+  }
+  const headers = ['级别', '操作类型', '系统序号', '校对ID', '工号', '姓名', '班组', '原开始日期', '原开始时间', '命中数', '候选序号', '说明'];
+  const rows = issues.map(i => headers.map(h => i[h] !== undefined ? i[h] : ''));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([headers, ...rows]), '定位异常清单');
+  downloadWorkbook(wb, '批量操作定位异常清单.xlsx');
 }
 
 // ==================== 文件上传绑定 ====================
