@@ -1,0 +1,134 @@
+/* Apple-style utility enhancements */
+
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 100px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+/* Table styles */
+.data-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.8125rem;
+}
+.data-table th {
+  text-align: left;
+  padding: 0.75rem 1rem;
+  font-weight: 600;
+  color: #6e6e73;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  white-space: nowrap;
+}
+.data-table td {
+  padding: 0.875rem 1rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+  color: #1d1d1f;
+}
+.data-table tr:last-child td {
+  border-bottom: none;
+}
+.data-table tbody tr:hover {
+  background: rgba(0, 113, 227, 0.03);
+}
+
+/* Step transitions */
+.step-content {
+  animation: fadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Drop zone */
+.drop-zone {
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.drop-zone.dragover {
+  border-color: #0071e3;
+  background: rgba(0, 113, 227, 0.04);
+  transform: scale(1.005);
+}
+
+/* Status badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.625rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.badge-success {
+  background: rgba(52, 199, 89, 0.1);
+  color: #1f8a3a;
+}
+.badge-warning {
+  background: rgba(255, 149, 0, 0.1);
+  color: #b36d00;
+}
+.badge-danger {
+  background: rgba(255, 59, 48, 0.1);
+  color: #c41c14;
+}
+.badge-info {
+  background: rgba(0, 113, 227, 0.1);
+  color: #005bb5;
+}
+.badge-muted {
+  background: rgba(0, 0, 0, 0.05);
+  color: #6e6e73;
+}
+
+/* Card hover */
+.hover-card {
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease;
+}
+.hover-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.06);
+}
+
+/* Button active state */
+.btn-primary:active {
+  transform: scale(0.98);
+}
+
+/* Step nav active indicator */
+.step-btn {
+  position: relative;
+}
+.step-btn.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 24px;
+  background: #0071e3;
+  border-radius: 0 4px 4px 0;
+}
