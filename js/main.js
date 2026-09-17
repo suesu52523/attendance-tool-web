@@ -495,12 +495,22 @@ function computeHours(startDate, startTime, endDate, endTime) {
 
 function parseDateParts(dateStr) {
   const s = String(dateStr).trim();
+  let parts = null;
   if (/^\d{8}$/.test(s)) {
-    return { y: parseInt(s.slice(0, 4), 10), m: parseInt(s.slice(4, 6), 10), d: parseInt(s.slice(6, 8), 10) };
+    parts = { y: parseInt(s.slice(0, 4), 10), m: parseInt(s.slice(4, 6), 10), d: parseInt(s.slice(6, 8), 10) };
+  } else {
+    const m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
+    if (m) {
+      parts = { y: parseInt(m[1], 10), m: parseInt(m[2], 10), d: parseInt(m[3], 10) };
+    }
   }
-  const m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
-  if (m) {
-    return { y: parseInt(m[1], 10), m: parseInt(m[2], 10), d: parseInt(m[3], 10) };
+  if (parts) {
+    // 格式对不代表日期存在：用 Date 往返比对拦下 2 月 30 日 / 13 月 / 4 月 31 日
+    // （不拦的话 new Date(2026,1,30) 会锚静挪到 2026-03-02，进 2007 表就成了 20260230）
+    // ponytail: 往返校验靠本地时间；中国无夏令时，夏令时地区会差 1 小时。升级路径 = Temporal.PlainDate
+    const rt = new Date(parts.y, parts.m - 1, parts.d);
+    const exists = rt.getFullYear() === parts.y && rt.getMonth() === parts.m - 1 && rt.getDate() === parts.d;
+    return exists ? parts : null;
   }
   const d = new Date(s);
   if (!isNaN(d.getTime())) {
@@ -730,8 +740,8 @@ function processGroupWorkbook(parsed) {
         const ed = parseDateParts(endDate);
         const st = parseTimeParts(startTime);
         const et = parseTimeParts(endTime);
-        if (!sd) rowFailures.push('加班开始日期格式错误');
-        if (!ed) rowFailures.push('加班结束日期格式错误');
+        if (!sd) rowFailures.push('加班开始日期无效（日期不存在或格式不对）');
+        if (!ed) rowFailures.push('加班结束日期无效（日期不存在或格式不对）');
         if (!st) rowFailures.push('加班开始时间格式错误');
         if (!et) rowFailures.push('加班结束时间格式错误');
       }
@@ -1917,6 +1927,13 @@ function applyBatchOperations(operations) {
     const startTime = normalizeTime(op['修改后开始时间']);
     const endDate = normalizeDate(op['修改后结束日期']);
     const endTime = normalizeTime(op['修改后结束时间']);
+    // 日期必须是日历上真存在的那天（2 月 30 日这类会被 JS 悄悄挪走）→ 不执行，退回人工核对
+    if ((startDate && !parseDateParts(startDate)) || (endDate && !parseDateParts(endDate))) {
+      op['定位状态'] = '日期不合理';
+      issues.push(buildLocateIssue(op, resolved, '日期不合理',
+        `修改后日期不存在（开始 ${startDate || '-'}，结束 ${endDate || '-'}），修改未执行。请核对日期`));
+      return;
+    }
     let hours = op['修改后上报加班时数'];
     if ((hours === '' || hours === undefined || hours === null) && startDate && startTime && endDate && endTime) {
       hours = computeHours(startDate, startTime, endDate, endTime);

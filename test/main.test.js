@@ -187,6 +187,75 @@ test('发给班组的整改表里，实际加班时数那一格是 0.5（不是 
   assert.strictEqual(row[headers.indexOf('上报加班时数')], 3, '同一行的其它时数不能被动到');
   assert.strictEqual(row[headers.indexOf('开始时间')], '15:45', '同一行的钟点列照旧');
 });
+// ==================== 不存在的日期（M1 问题 2） ====================
+// 来源：docs/排查/M1-问题说明.html 的问题 2。
+// 口径：「格式对」不等于「日期存在」：2 月 30 日 / 13 月 / 4 月 31 日 这类必须退回，
+//       不能靠 new Date 自动挪到别的日子（2026-02-30 会被挪成 2026-03-02，进 2007 表就成了 20260230）。
+section('不存在的日期（M1 问题 2）');
+
+const DATE_ROW_HEADERS = ['序号', '工号', '姓名', '班组', '加班开始日期', '加班开始时间',
+  '加班结束日期', '加班结束时间', '加班时数', '加班原因', '加班类别', '科负责人核准'];
+function groupWorkbookWithDate(startDate, endDate) {
+  return { fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    DATE_ROW_HEADERS,
+    [1, '10010001', '张三', '一组', startDate, '08:00', endDate, '17:00', '', '产能爬坡', '工作日', '核准'],
+  ] } };
+}
+
+test('2 月 30 日被退回，不进合并大表', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithDate('2026-02-30', '2026-02-30'));
+  assert.strictEqual(appState.mergedRecords.length, 0, '不存在的日期不能进大表');
+  assert.strictEqual(appState.groupFailures.length, 1);
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('日期无效'), appState.groupFailures[0]['失败原因']);
+});
+
+test('8 位写法 20260230 同样被退回', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithDate('20260230', '20260230'));
+  assert.strictEqual(appState.mergedRecords.length, 0);
+  assert.strictEqual(appState.groupFailures.length, 1);
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('日期无效'), appState.groupFailures[0]['失败原因']);
+});
+
+test('13 月 / 4 月 31 日被退回', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithDate('2026-13-01', '2026-13-01'));
+  assert.strictEqual(appState.mergedRecords.length, 0, '13 月不能进大表');
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithDate('2026-04-31', '2026-04-31'));
+  assert.strictEqual(appState.mergedRecords.length, 0, '4 月 31 日不能进大表');
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('日期无效'), appState.groupFailures[0]['失败原因']);
+});
+
+test('闰年边界：2026-02-29 退回（2026 不是闰年）、2028-02-29 通过', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithDate('2026-02-29', '2026-02-29'));
+  assert.strictEqual(appState.mergedRecords.length, 0, '2026 不是闰年，2 月 29 日不存在');
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithDate('2028-02-29', '2028-02-29'));
+  assert.strictEqual(appState.groupFailures.length, 0, '2028 是闰年，2 月 29 日必须照常通过');
+  assert.strictEqual(appState.mergedRecords.length, 1);
+});
+
+test('整改阶段：修改后日期不存在 → 记一条清单且原记录不变', () => {
+  resetState();
+  appState.mergedRecords = [{
+    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '底盘一组',
+    加班开始日期: '2026-08-01', 加班开始时间: '08:00',
+    加班结束日期: '2026-08-01', 加班结束时间: '17:00', 加班时数: 9,
+  }];
+  const res = m.applyBatchOperations([{
+    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '底盘一组', 操作类型: '修改', roundNo: 1,
+    原开始日期: '20260801', 原开始时间: '08:00',
+    修改后开始日期: '2026-02-30', 修改后开始时间: '08:00',
+    修改后结束日期: '2026-02-30', 修改后结束时间: '17:00',
+  }]);
+  assert.strictEqual(res.issues.length, 1, '应记一条驳回');
+  assert.strictEqual(res.issues[0]['级别'], '日期不合理');
+  assert.ok(res.issues[0]['说明'].includes('日期'), res.issues[0]['说明']);
+  assert.strictEqual(appState.mergedRecords[0]['加班开始日期'], '2026-08-01', '原记录不能被改');
+});
 
 // ==================== 合并大表定位 ====================
 section('合并大表定位（业务键）');
