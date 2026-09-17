@@ -175,7 +175,7 @@ test('姓名与合并大表不一致的记录仍匹配成功，只给提醒（�
   assert.ok(round.abnormalWarnings.length === 4);
   assert.ok(round.abnormalWarnings.every(w => w['定位提醒'].includes('不一致')));
   assert.ok(round.abnormalWarnings.every(w => w['匹配状态'] === '已匹配'));
-  assert.ok(round.abnormalWarnings.every(w => w['系统序号']));
+  assert.ok(round.abnormalWarnings.every(w => w['工号']), '每条提醒都要能定位到人（工号）');
   const failNos = round.abnormalFailures.map(f => f['工号']);
   round.abnormalWarnings.forEach(w => assert.ok(!failNos.includes(w['工号']), `${w['工号']} 不应判为匹配失败`));
 });

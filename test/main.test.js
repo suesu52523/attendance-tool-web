@@ -180,7 +180,7 @@ test('姓名多一个字时仍按 工号+日期+时间 匹配成功，并给出�
   const rec = appState.abnormalRecords[0];
   const round = appState.rounds[0];
   assert.strictEqual(rec['匹配状态'], '已匹配');
-  assert.strictEqual(rec['系统序号'], 1);
+  assert.ok(!('系统序号' in rec), '异常记录不再带「系统序号」字段：序号不是身份，也不代表已处理');
   assert.strictEqual(round.abnormalFailures.length, 0);
   assert.strictEqual(round.abnormalWarnings.length, 1);
   assert.ok(round.abnormalWarnings[0]['定位提醒'].includes('不一致'));
@@ -191,7 +191,7 @@ test('异常表姓名为空时仍能匹配成功', () => {
   appState.mergedRecords = makeMergedRecords();
   m.processAbnormalWorkbook(abnormalParsed([[45, '10010002', '', '底盘一组', 20260802, '07:00', 20260802, '15:00', 8]]));
   assert.strictEqual(appState.abnormalRecords[0]['匹配状态'], '已匹配');
-  assert.strictEqual(appState.abnormalRecords[0]['系统序号'], 2);
+  assert.strictEqual(appState.rounds[0].abnormalWarnings.length, 0, '姓名空不产生不一致提醒');
 });
 
 test('工号不存在 / 日期差一天时进入失败清单', () => {
@@ -217,6 +217,7 @@ test('同工号同日多条且未填开始时间 → 标记「多条命中」并
   assert.strictEqual(appState.abnormalRecords[0]['匹配状态'], '多条命中(2)');
   assert.strictEqual(round.abnormalWarnings.length, 1);
   assert.ok(round.abnormalWarnings[0]['定位提醒'].includes('2 条'));
+  assert.ok(!round.abnormalWarnings[0]['定位提醒'].includes('已暂按'), '不能声称“已按序号处理”：多个候选时工具不会自己挑一条');
 });
 
 test('多条命中时，候选中与异常表科室一致的那条会被点名', () => {

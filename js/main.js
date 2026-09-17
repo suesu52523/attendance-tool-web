@@ -847,12 +847,11 @@ function processAbnormalWorkbook(parsed) {
           失败原因: '无法在合并大表中匹配到对应记录（请核对工号、开始日期/时间）',
         });
       } else {
-        rec['系统序号'] = hits[0]['系统序号'];
         if (hits.length > 1) {
           warnings.push({
             ...rec,
             行号: idx + 2,
-            定位提醒: `合并大表中存在 ${hits.length} 条同工号同日期记录：${describeCandidates(hits)}，已暂按序号 ${hits[0]['系统序号']} 处理${buildDeptHint(hits, rec['科室'])}。若是同一条加班被重复填报到多个班组（一个人只应属于一个班组），请先清理合并大表；若确实是同一天两次加班，请在异常表补填「开始时间」以便唯一定位`,
+            定位提醒: `合并大表中存在 ${hits.length} 条同工号同日期记录：${describeCandidates(hits)}，尚未处理${buildDeptHint(hits, rec['科室'])}。若是同一条加班被重复填报到多个班组（一个人只应属于一个班组），请先清理合并大表；若确实是同一天两次加班，请在异常表补填「开始时间」以便唯一定位`,
           });
         }
         if (empName && String(hits[0]['姓名'] || '').trim() !== empName) {
@@ -1274,7 +1273,7 @@ function renderAbnormal() {
           <i class="ph ph-info mt-0.5 text-lg"></i>
           <div>
             <div class="font-medium">有 ${warnings.length} 条记录需要人工核对</div>
-            <div class="text-apple-muted mt-1">存在同一工号同一天多条加班（已暂按第一条定位），或异常表姓名与合并大表不一致。请在下方「异常记录清单」核对「系统序号 / 匹配状态」两列，必要时下载清单交由组长确认。</div>
+            <div class="text-apple-muted mt-1">存在同一工号同一天多条加班（需要确认是哪一条），或异常表姓名与合并大表不一致。请在下方「异常记录清单」核对「匹配状态」列，必要时下载定位提醒交由组长确认。</div>
           </div>
         </div>
         <button onclick="exportAbnormalWarnings()" class="h-9 px-4 rounded-full bg-apple-orange/10 text-apple-orange text-xs font-medium hover:bg-apple-orange/20 transition-colors shrink-0">下载定位提醒</button>
