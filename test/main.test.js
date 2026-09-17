@@ -650,8 +650,18 @@ test('操作执行记录：列名叫校对ID，写的是校对单号（不再冒
   m.applyBatchOperations(appState.rectifyOperations);
   captured = [];
   m.exportOperationLog();
-  assert.deepStrictEqual(captured[0].rows[0], ['轮次', '校对ID', '工号', '姓名', '班组', '操作类型', '操作详情', '备注']);
+  assert.deepStrictEqual(captured[0].rows[0], ['轮次', '校对ID', '工号', '姓名', '班组', '操作类型', '定位状态', '操作详情', '备注']);
   assert.strictEqual(String(captured[0].rows[1][1]), '901');
+  assert.strictEqual(captured[0].rows[1][6], '已定位(业务键)', '定位状态列要写清这条到底执行没执行');
+});
+
+test('操作执行记录：没执行的操作也必须如实标出来（不能看起来像做了）', () => {
+  resetState();
+  const op = { 校对ID: 5, 工号: '10010099', 姓名: '查无', 班组: '未知', 操作类型: '删除', roundNo: 1, 原开始日期: '20260801', 原开始时间: '15:45', 定位状态: '未定位' };
+  appState.rounds = [{ roundNo: 1, rectifyOperations: [op] }];
+  captured = [];
+  m.exportOperationLog();
+  assert.strictEqual(captured[0].rows[1][6], '未定位', '没执行的必须写明未定位，不能让人以为删过了');
 });
 
 test('业务键定位仍然优先于任何号码：校对单号撞上别人也不改错人', () => {

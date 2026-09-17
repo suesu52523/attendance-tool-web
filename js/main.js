@@ -2245,9 +2245,11 @@ function exportOperationLog() {
     showToast('暂无操作记录，请先执行批量操作', 'error');
     return false;
   }
-  const headers = ['轮次', '校对ID', '工号', '姓名', '班组', '操作类型', '操作详情', '备注'];
+  // 定位状态列：只有「已定位(…)」是真执行过的；未定位 / 多条命中 / 未识别 / 待定位 都是"没动手"
+  // （M2-3 起多条命中不再挑一条执行，所以这份记录必须能区分"记了"和"做了"）
+  const headers = ['轮次', '校对ID', '工号', '姓名', '班组', '操作类型', '定位状态', '操作详情', '备注'];
   const rows = ops.map(op => [
-    op['roundNo'] || 1, op['校对ID'], op['工号'], op['姓名'], op['班组'], op['操作类型'], op['操作详情'], op['备注'] || ''
+    op['roundNo'] || 1, op['校对ID'], op['工号'], op['姓名'], op['班组'], op['操作类型'], op['定位状态'] || '', op['操作详情'], op['备注'] || ''
   ]);
 
   const wb = XLSX.utils.book_new();
