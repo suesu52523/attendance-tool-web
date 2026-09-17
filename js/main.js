@@ -461,7 +461,11 @@ function toYYYYMMDD(dateVal) {
 
 function parseTimeParts(timeStr) {
   const t = normalizeTime(timeStr);
-  const m = t.match(/(\d{1,2}):(\d{2})/);
+  // 必须整串就是一个时刻：拦下 "15:00~19:00"（一格写两个时间）、"19:00（次日）" 这类
+  // （以前没锁头尾，"15:00~19:00" 会被当成 15:00 用，脏值一路进大表并原样导出）
+  // 口径跟 padTime 一致：h:mm，可带秒
+  // ponytail: 带秒的值会原样进导出；若校对系统不认 h:mm:ss，再在导出前截断到分
+  const m = t.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
   if (!m) return null;
   const h = parseInt(m[1], 10);
   const mi = parseInt(m[2], 10);
@@ -742,8 +746,8 @@ function processGroupWorkbook(parsed) {
         const et = parseTimeParts(endTime);
         if (!sd) rowFailures.push('加班开始日期无效（日期不存在或格式不对）');
         if (!ed) rowFailures.push('加班结束日期无效（日期不存在或格式不对）');
-        if (!st) rowFailures.push('加班开始时间格式错误');
-        if (!et) rowFailures.push('加班结束时间格式错误');
+        if (!st) rowFailures.push('加班开始时间格式错误（只能填一个时刻，如 8:15 或 08:15）');
+        if (!et) rowFailures.push('加班结束时间格式错误（只能填一个时刻，如 8:15 或 08:15）');
       }
 
       if (rowFailures.length) {
@@ -1932,6 +1936,13 @@ function applyBatchOperations(operations) {
       op['定位状态'] = '日期不合理';
       issues.push(buildLocateIssue(op, resolved, '日期不合理',
         `修改后日期不存在（开始 ${startDate || '-'}，结束 ${endDate || '-'}），修改未执行。请核对日期`));
+      return;
+    }
+    // 时间必须是单个时刻（一格写两个时间/带备注都不认）→ 不执行，退回人工核对
+    if ((startTime && !parseTimeParts(startTime)) || (endTime && !parseTimeParts(endTime))) {
+      op['定位状态'] = '时间不合理';
+      issues.push(buildLocateIssue(op, resolved, '时间不合理',
+        `修改后时间不是一个时刻（开始 ${startTime || '-'}，结束 ${endTime || '-'}），修改未执行。请一格只填一个时刻，如 8:15`));
       return;
     }
     let hours = op['修改后上报加班时数'];

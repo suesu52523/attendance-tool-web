@@ -256,6 +256,78 @@ test('整改阶段：修改后日期不存在 → 记一条清单且原记录不
   assert.ok(res.issues[0]['说明'].includes('日期'), res.issues[0]['说明']);
   assert.strictEqual(appState.mergedRecords[0]['加班开始日期'], '2026-08-01', '原记录不能被改');
 });
+// ==================== 一格写两个时间（M1 问题 4） ====================
+// 来源：docs/排查/M1-问题说明.html 的问题 4。
+// 口径：一个格子只装一个时刻。"15:00~19:00" / "19:00（次日）" 这类以前会被当成 15:00 放行，
+//       脏值一路进合并大表并被原样导出到 2007 表 → 必须退回。
+section('一格写两个时间（M1 问题 4）');
+
+const TIME_ROW_HEADERS = ['序号', '工号', '姓名', '班组', '加班开始日期', '加班开始时间',
+  '加班结束日期', '加班结束时间', '加班时数', '加班原因', '加班类别', '科负责人核准'];
+function groupWorkbookWithTime(startTime, endTime) {
+  return { fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    TIME_ROW_HEADERS,
+    [1, '10010001', '张三', '一组', '2026-08-01', startTime, '2026-08-01', endTime, '', '产能爬坡', '工作日', '核准'],
+  ] } };
+}
+
+test('区间写法 15:00~19:00 被退回（以前会被当成 15:00 放行）', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithTime('15:00~19:00', '19:00'));
+  assert.strictEqual(appState.mergedRecords.length, 0, '区间写法不能进大表');
+  assert.strictEqual(appState.groupFailures.length, 1);
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('加班开始时间格式错误'), appState.groupFailures[0]['失败原因']);
+});
+
+test('带备注的时间 19:00（次日）被退回', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithTime('19:00（次日）', '19:00'));
+  assert.strictEqual(appState.mergedRecords.length, 0, '带备注的时间不能进大表');
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('加班开始时间格式错误'));
+});
+
+test('中文连接词 15:00 至 19:00 被退回', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithTime('15:00', '15:00 至 19:00'));
+  assert.strictEqual(appState.mergedRecords.length, 0);
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('加班结束时间格式错误'));
+});
+
+test('带秒 15:00:30 照常通过（沿用上游既有口径，与 padTime 一致）', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithTime('15:00:30', '19:00'));
+  assert.strictEqual(appState.groupFailures.length, 0, '带秒是合法的单个时刻，不能误拦');
+  assert.strictEqual(appState.mergedRecords.length, 1);
+});
+
+test('单个时刻照常通过：8:15 / 08:15（回归）', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithTime('8:15', '18:15'));
+  assert.strictEqual(appState.groupFailures.length, 0, '单个时刻不能被误拦');
+  assert.strictEqual(appState.mergedRecords.length, 1);
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithTime('08:15', '18:15'));
+  assert.strictEqual(appState.mergedRecords.length, 1, '08:15 同样要放行');
+});
+
+test('整改阶段：修改后时间是区间 → 记一条清单且原记录不变', () => {
+  resetState();
+  appState.mergedRecords = [{
+    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '底盘一组',
+    加班开始日期: '2026-08-01', 加班开始时间: '15:45',
+    加班结束日期: '2026-08-01', 加班结束时间: '18:45', 加班时数: 3,
+  }];
+  const res = m.applyBatchOperations([{
+    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '底盘一组', 操作类型: '修改', roundNo: 1,
+    原开始日期: '20260801', 原开始时间: '15:45',
+    修改后开始日期: '2026-08-01', 修改后开始时间: '15:00~19:00',
+    修改后结束日期: '2026-08-01', 修改后结束时间: '19:00',
+  }]);
+  assert.strictEqual(res.issues.length, 1, '应记一条驳回');
+  assert.strictEqual(res.issues[0]['级别'], '时间不合理');
+  assert.ok(res.issues[0]['说明'].includes('时刻'), res.issues[0]['说明']);
+  assert.strictEqual(appState.mergedRecords[0]['加班开始时间'], '15:45', '原记录不能被改');
+});
 
 // ==================== 合并大表定位 ====================
 section('合并大表定位（业务键）');
