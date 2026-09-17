@@ -443,6 +443,16 @@ function normalizeDate(str) {
       return `${y}-${m}-${day}`;
     }
   }
+  // 中文日期写法统一成 2026-08-10：2026年8月10日 / 2026 年 8 月 10 号 / 全角数字
+  // 这里只管“把写法统一”，日期到底存不存在由 parseDateParts 的日历校验把关（2 月 30 日不转）
+  const cn = s.normalize('NFKC').match(/^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]$/);
+  if (cn) {
+    const y = +cn[1], mo = +cn[2], d = +cn[3];
+    const rt = new Date(y, mo - 1, d);
+    if (rt.getFullYear() === y && rt.getMonth() === mo - 1 && rt.getDate() === d) {
+      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
   return s;
 }
 
@@ -582,6 +592,12 @@ function formatCellValue(value, header) {
   if (h.includes('时间') && !h.includes('时数') && typeof value === 'number') {
     const formatted = excelTimeToString(value);
     if (formatted) return formatted;
+  }
+  // 日期列里的中文写法也统一（三张导入表都过这个函数，转一次，下游的校验、匹配、导出就全对齐了）
+  // 只对含“年月日/号”的文本下手，其他写法原样不动（不扩大改动面）
+  if (h.includes('日期') && typeof value === 'string' && /[年月日号]/.test(value)) {
+    const normalized = normalizeDate(value);
+    if (normalized !== value) return normalized;
   }
   return value;
 }

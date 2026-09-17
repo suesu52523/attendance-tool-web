@@ -118,7 +118,6 @@ function rectifyParsed(rows) {
 
 console.log('总装科月度加班自动处理工具 · v2 单元测试');
 
-
 // ==================== 工具函数 ====================
 section('日期时间归一化');
 
@@ -259,77 +258,6 @@ test('整改阶段：修改后日期不存在 → 记一条清单且原记录不
   assert.ok(res.issues[0]['说明'].includes('日期'), res.issues[0]['说明']);
   assert.strictEqual(appState.mergedRecords[0]['加班开始日期'], '2026-08-01', '原记录不能被改');
 });
-// ==================== 加班时数上限（M1 问题 5） ====================
-// 业务口径（2026-09-17）：单条加班时数上限 48 小时，超过的退回班组核对。
-// 背景：以前没有任何上下界，49 小时这种“跨天算错 / 多打一位”的值能直接进大表并导出。
-section('加班时数上限（M1 问题 5）');
-
-const LIMIT_HEADERS = ['序号', '工号', '姓名', '班组', '加班开始日期', '加班开始时间',
-  '加班结束日期', '加班结束时间', '加班时数', '加班原因', '加班类别', '科负责人核准'];
-function groupWorkbookWithHours(date, startTime, endTime, hours) {
-  return { fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
-    LIMIT_HEADERS,
-    [1, '10010001', '张三', '一组', date, startTime, date, endTime, hours, '产能爬坡', '工作日', '核准'],
-  ] } };
-}
-
-test('填 49 小时被退回（超过 48 上限）', () => {
-  resetState();
-  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '17:00', 49));
-  assert.strictEqual(appState.mergedRecords.length, 0, '超上限的行不能进大表');
-  assert.strictEqual(appState.groupFailures.length, 1);
-  assert.ok(appState.groupFailures[0]['失败原因'].includes('48'), appState.groupFailures[0]['失败原因']);
-});
-
-test('填 48 小时照常通过（边界值）', () => {
-  resetState();
-  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '17:00', 48));
-  assert.strictEqual(appState.groupFailures.length, 0, '48 小时是边界内，不能误拦');
-  assert.strictEqual(appState.mergedRecords.length, 1);
-  assert.strictEqual(appState.mergedRecords[0]['加班时数'], 48);
-});
-
-test('时数留空但算出来超 48 小时，同样退回', () => {
-  resetState();
-  // 2026-08-01 08:00 → 2026-08-03 09:00 = 49 小时
-  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '09:00', ''));
-  appState.mergedRecords = [];
-  resetState();
-  const wb = { fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
-    LIMIT_HEADERS,
-    [1, '10010001', '张三', '一组', '2026-08-01', '08:00', '2026-08-03', '09:00', '', '产能爬坡', '工作日', '核准'],
-  ] } };
-  m.processGroupWorkbook(wb);
-  assert.strictEqual(appState.mergedRecords.length, 0, '算出来的 49 小时也不能进大表');
-  assert.ok(appState.groupFailures[0]['失败原因'].includes('48'), appState.groupFailures[0]['失败原因']);
-});
-
-test('样本里的正常取值（8 小时）不受影响', () => {
-  resetState();
-  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '17:00', 8));
-  assert.strictEqual(appState.groupFailures.length, 0);
-  assert.strictEqual(appState.mergedRecords[0]['加班时数'], 8);
-});
-
-test('整改阶段：修改后时数超上限 → 记一条清单且原记录不变', () => {
-  resetState();
-  appState.mergedRecords = [{
-    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '底盘一组',
-    加班开始日期: '2026-08-01', 加班开始时间: '08:00',
-    加班结束日期: '2026-08-01', 加班结束时间: '17:00', 加班时数: 9,
-  }];
-  const res = m.applyBatchOperations([{
-    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '底盘一组', 操作类型: '修改', roundNo: 1,
-    原开始日期: '20260801', 原开始时间: '08:00',
-    修改后开始日期: '2026-08-01', 修改后开始时间: '08:00',
-    修改后结束日期: '2026-08-01', 修改后结束时间: '17:00',
-    修改后上报加班时数: 49,
-  }]);
-  assert.strictEqual(res.issues.length, 1, '应记一条驳回');
-  assert.strictEqual(res.issues[0]['级别'], '时数不合理');
-  assert.ok(res.issues[0]['说明'].includes('48'), res.issues[0]['说明']);
-  assert.strictEqual(appState.mergedRecords[0]['加班时数'], 9, '原记录不能被改');
-});
 // ==================== 一格写两个时间（M1 问题 4） ====================
 // 来源：docs/排查/M1-问题说明.html 的问题 4。
 // 口径：一个格子只装一个时刻。"15:00~19:00" / "19:00（次日）" 这类以前会被当成 15:00 放行，
@@ -464,6 +392,145 @@ test('整改阶段：修改后结束早于开始被驳回，不改动原记录',
   const rec = appState.mergedRecords[0];
   assert.strictEqual(rec['加班结束日期'], '2026-08-02', '原记录不能被改');
   assert.strictEqual(rec['加班时数'], 4, '原时数不能被改');
+});
+// ==================== 加班时数上限（M1 问题 5） ====================
+// 业务口径（2026-09-17）：单条加班时数上限 48 小时，超过的退回班组核对。
+// 背景：以前没有任何上下界，49 小时这种“跨天算错 / 多打一位”的值能直接进大表并导出。
+section('加班时数上限（M1 问题 5）');
+
+const LIMIT_HEADERS = ['序号', '工号', '姓名', '班组', '加班开始日期', '加班开始时间',
+  '加班结束日期', '加班结束时间', '加班时数', '加班原因', '加班类别', '科负责人核准'];
+function groupWorkbookWithHours(date, startTime, endTime, hours) {
+  return { fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    LIMIT_HEADERS,
+    [1, '10010001', '张三', '一组', date, startTime, date, endTime, hours, '产能爬坡', '工作日', '核准'],
+  ] } };
+}
+
+test('填 49 小时被退回（超过 48 上限）', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '17:00', 49));
+  assert.strictEqual(appState.mergedRecords.length, 0, '超上限的行不能进大表');
+  assert.strictEqual(appState.groupFailures.length, 1);
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('48'), appState.groupFailures[0]['失败原因']);
+});
+
+test('填 48 小时照常通过（边界值）', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '17:00', 48));
+  assert.strictEqual(appState.groupFailures.length, 0, '48 小时是边界内，不能误拦');
+  assert.strictEqual(appState.mergedRecords.length, 1);
+  assert.strictEqual(appState.mergedRecords[0]['加班时数'], 48);
+});
+
+test('时数留空但算出来超 48 小时，同样退回', () => {
+  resetState();
+  // 2026-08-01 08:00 → 2026-08-03 09:00 = 49 小时
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '09:00', ''));
+  appState.mergedRecords = [];
+  resetState();
+  const wb = { fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    LIMIT_HEADERS,
+    [1, '10010001', '张三', '一组', '2026-08-01', '08:00', '2026-08-03', '09:00', '', '产能爬坡', '工作日', '核准'],
+  ] } };
+  m.processGroupWorkbook(wb);
+  assert.strictEqual(appState.mergedRecords.length, 0, '算出来的 49 小时也不能进大表');
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('48'), appState.groupFailures[0]['失败原因']);
+});
+
+test('样本里的正常取值（8 小时）不受影响', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '17:00', 8));
+  assert.strictEqual(appState.groupFailures.length, 0);
+  assert.strictEqual(appState.mergedRecords[0]['加班时数'], 8);
+});
+
+test('整改阶段：修改后时数超上限 → 记一条清单且原记录不变', () => {
+  resetState();
+  appState.mergedRecords = [{
+    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '底盘一组',
+    加班开始日期: '2026-08-01', 加班开始时间: '08:00',
+    加班结束日期: '2026-08-01', 加班结束时间: '17:00', 加班时数: 9,
+  }];
+  const res = m.applyBatchOperations([{
+    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '底盘一组', 操作类型: '修改', roundNo: 1,
+    原开始日期: '20260801', 原开始时间: '08:00',
+    修改后开始日期: '2026-08-01', 修改后开始时间: '08:00',
+    修改后结束日期: '2026-08-01', 修改后结束时间: '17:00',
+    修改后上报加班时数: 49,
+  }]);
+  assert.strictEqual(res.issues.length, 1, '应记一条驳回');
+  assert.strictEqual(res.issues[0]['级别'], '时数不合理');
+  assert.ok(res.issues[0]['说明'].includes('48'), res.issues[0]['说明']);
+  assert.strictEqual(appState.mergedRecords[0]['加班时数'], 9, '原记录不能被改');
+});
+// ==================== 中文日期（M1-6） ====================
+// 业务口径（2026-09-17）：中文日期认下来，往全了做。
+// 真实来源：样本 02-班组填报-校验失败.xlsx / 内装A1组 行8 写的就是 "2026年8月10日"，
+//          过去一律退回让班组重填（手工誊写到系统里平白多一步）。
+// 口径：只认“年月日 / 年月号”这一种；日期不存在的（2026年2月30日）仍然退回。
+section('中文日期（M1-6）');
+
+const CN_HEADERS = ['序号', '工号', '姓名', '班组', '加班开始日期', '加班开始时间',
+  '加班结束日期', '加班结束时间', '加班时数', '加班原因', '加班类别', '科负责人核准'];
+function groupWorkbookWithDateText(startDate, endDate) {
+  return { fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    CN_HEADERS,
+    [1, '10010001', '张三', '一组', startDate, '15:45', endDate, '18:45', '', '产能爬坡', '工作日', '核准'],
+  ] } };
+}
+
+test('中文日期 2026年8月10日 被认下，并统一成 2026-08-10', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithDateText('2026年8月10日', '2026年8月10日'));
+  assert.strictEqual(appState.groupFailures.length, 0, '中文日期不该再被退回');
+  assert.strictEqual(appState.mergedRecords.length, 1);
+  assert.strictEqual(appState.mergedRecords[0]['加班开始日期'], '2026-08-10', '大表里要统一成短横线写法');
+  assert.strictEqual(appState.mergedRecords[0]['加班时数'], 3, '算工时也要能算出来');
+  assert.strictEqual(m.buildSystemRecords(appState.mergedRecords)[0]['开始日期'], '20260810', '导出的 2007 表要是 8 位');
+});
+
+test('中文日期的各种写法（往全了做）', () => {
+  const forms = ['2026年08月10日', '2026年8月10号', '2026 年 8 月 10 日', '２０２６年８月１０日', '2026年8月10日 '];
+  for (const f of forms) {
+    resetState();
+    m.processGroupWorkbook(groupWorkbookWithDateText(f, f));
+    assert.strictEqual(appState.mergedRecords.length, 1, `${f} 应该被认下`);
+    assert.strictEqual(appState.mergedRecords[0]['加班开始日期'], '2026-08-10', `${f} 应该归一`);
+  }
+});
+
+test('中文写法但日期不存在（2026年2月30日）仍要退回', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithDateText('2026年2月30日', '2026年2月30日'));
+  assert.strictEqual(appState.mergedRecords.length, 0, '不能把 2 月 30 日洗成看起来合法的日期');
+  assert.strictEqual(appState.groupFailures.length, 1);
+});
+
+test('既有写法行为不变（短横线 / 8 位 / 斜线）', () => {
+  for (const f of ['2026-08-10', '20260810', '2026/8/10']) {
+    resetState();
+    m.processGroupWorkbook(groupWorkbookWithDateText(f, f));
+    assert.strictEqual(appState.mergedRecords.length, 1, `${f} 应该照旧放行`);
+    assert.strictEqual(appState.mergedRecords[0]['加班开始日期'], f, `${f} 不该被改动`);
+    assert.strictEqual(m.buildSystemRecords(appState.mergedRecords)[0]['开始日期'], '20260810');
+  }
+});
+
+test('整改表里的中文日期同样归一（端到端）', () => {
+  resetState();
+  m.processRectifyWorkbook(rectifyParsed([[1, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '18:45', 3,
+    '修改', '2026年8月10日', '15:45', '2026年8月10日', '18:45', '', '', '', '']]));
+  assert.strictEqual(appState.rectifyOperations[0]['修改后开始日期'], '2026-08-10', '导入时就该归一');
+  appState.mergedRecords = [{
+    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '底盘一组',
+    加班开始日期: '2026-08-01', 加班开始时间: '15:45',
+    加班结束日期: '2026-08-01', 加班结束时间: '18:45', 加班时数: 3,
+  }];
+  const res = m.applyBatchOperations(appState.rectifyOperations);
+  assert.strictEqual(res.issues.length, 0, '中文日期不该被当成异常');
+  assert.strictEqual(appState.mergedRecords[0]['加班开始日期'], '2026-08-10');
+  assert.strictEqual(m.buildSystemRecords(appState.mergedRecords)[0]['开始日期'], '20260810');
 });
 
 // ==================== 合并大表定位 ====================
@@ -695,7 +762,6 @@ test('合并大表为空时所有定位类操作进入清单，且 applied = 0',
   assert.strictEqual(res.issues.length, 1);
   assert.ok(res.issues[0]['说明'].includes('合并大表为空'));
 });
-
 
 // ==================== 确认执行 ====================
 section('确认执行批量操作');
