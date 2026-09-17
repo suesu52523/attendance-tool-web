@@ -1829,7 +1829,8 @@ function getOpBadgeClass(type) {
 function confirmBatch() {
   const round = getCurrentRound();
   // 本轮已执行过：必须禁止重复执行
-  // 合并大表在删除后会重新编排序号，重复执行同一份整改表会按旧 ID 改到/删掉别人的记录
+  // 同一批操作做第二遍会写在已经被改过的数据上（删除会重排大表序号、修改会改掉原业务键），结果正确性无法保证
+  // —— 宁可拦住，让人确认后再开新一轮
   if (round.status === 'confirmed' || appState.batchConfirmed) {
     showToast('本轮批量操作已执行过，不能重复执行。如需重做，请先点「开始新一轮处理」并重新导入整改表', 'error');
     return;
@@ -1874,7 +1875,7 @@ function confirmBatch() {
 }
 
 // 将整改操作应用到合并大表
-// 定位优先级：① 业务键（工号 + 原开始日期 + 原开始时间） ② 回退：ID 等于系统序号
+// 定位只用业务键（工号 + 原开始日期 + 原开始时间），见 resolveOperationTarget：序号不是身份，定位不到就进清单
 // 返回 { applied, issues }；未定位/多条命中的操作会记录到 issues，不再静默跳过
 function applyBatchOperations(operations) {
   const issues = [];
