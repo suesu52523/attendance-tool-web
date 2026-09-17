@@ -1901,12 +1901,13 @@ function applyBatchOperations(operations) {
       return;
     }
     if (resolved.hits > 1) {
+      // 同工号同日期多条 = 挑不准是哪一条：宁可不改（改错行会算错当天工时），退回让人补「原开始时间」
       op['定位状态'] = `多条命中(${resolved.hits})`;
       issues.push(buildLocateIssue(op, resolved, '多条命中',
-        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，修改仅作用于序号 ${resolved.target['系统序号']}，请人工确认${buildDeptHint(resolved.candidates, op['班组'])}`));
-    } else {
-      op['定位状态'] = `已定位(${resolved.method})`;
+        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，修改未执行。请补填「原开始时间」以唯一定位后重新导入${buildDeptHint(resolved.candidates, op['班组'])}`));
+      return;
     }
+    op['定位状态'] = `已定位(${resolved.method})`;
 
     const target = resolved.target;
     const startDate = normalizeDate(op['修改后开始日期']);
@@ -1934,12 +1935,13 @@ function applyBatchOperations(operations) {
       return;
     }
     if (resolved.hits > 1) {
+      // 同上：删错行不可逆，宁可不删；人补齐「原开始时间」后重导自然能唯一定位
       op['定位状态'] = `多条命中(${resolved.hits})`;
       issues.push(buildLocateIssue(op, resolved, '多条命中',
-        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，仅对序号 ${resolved.target['系统序号']} 执行${op['操作类型']}，请人工确认${buildDeptHint(resolved.candidates, op['班组'])}`));
-    } else {
-      op['定位状态'] = `已定位(${resolved.method})`;
+        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，${op['操作类型']}未执行。请补填「原开始时间」以唯一定位后重新导入${buildDeptHint(resolved.candidates, op['班组'])}`));
+      return;
     }
+    op['定位状态'] = `已定位(${resolved.method})`;
     removeTargets.add(resolved.target);
   });
 

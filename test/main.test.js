@@ -336,7 +336,7 @@ test('业务键缺日期时也不猜序号：仍然进清单，不动任何记�
   assert.strictEqual(appState.mergedRecords.length, 4, '不应误删任何记录');
 });
 
-test('多条命中时列出候选序号，并只作用于第一条', () => {
+test('多条命中时列出候选序号，但不许自己挑一条动手（一条都不动）', () => {
   resetState();
   appState.mergedRecords = [
     { 系统序号: 1, 工号: '10010001', 姓名: '张三', 加班开始日期: '2026-08-01', 加班开始时间: '15:45', 加班时数: 1.83 },
@@ -346,9 +346,40 @@ test('多条命中时列出候选序号，并只作用于第一条', () => {
   const res = m.applyBatchOperations([op]);
   assert.strictEqual(res.issues.length, 1);
   assert.strictEqual(res.issues[0]['级别'], '多条命中');
-  assert.strictEqual(res.issues[0]['候选序号'], '1、2');
-  assert.strictEqual(appState.mergedRecords.length, 1);
-  assert.strictEqual(appState.mergedRecords[0]['加班开始时间'], '20:00', '只删掉第一条');
+  assert.strictEqual(res.issues[0]['候选序号'], '1、2', '仍要列出候选，方便人工核对');
+  assert.strictEqual(op['定位状态'], '多条命中(2)');
+  assert.strictEqual(appState.mergedRecords.length, 2, '挑不准就不许动手：两条都得留着');
+  assert.ok(res.issues[0]['说明'].includes('未执行'), '说明要写明“没执行”');
+  assert.ok(res.issues[0]['说明'].includes('原开始时间'), '并告诉人怎么消除歧义（补填原开始时间）');
+});
+
+test('多条命中（修改）：不执行修改，两条记录一个格都不许变', () => {
+  resetState();
+  appState.mergedRecords = [
+    { 系统序号: 1, 工号: '10010001', 姓名: '张三', 加班开始日期: '2026-08-01', 加班开始时间: '15:45', 加班结束日期: '2026-08-01', 加班结束时间: '18:45', 加班时数: 3 },
+    { 系统序号: 2, 工号: '10010001', 姓名: '张三', 加班开始日期: '2026-08-01', 加班开始时间: '20:00', 加班结束日期: '2026-08-01', 加班结束时间: '22:00', 加班时数: 2 },
+  ];
+  const before = JSON.stringify(appState.mergedRecords);
+  const op = { 工号: '10010001', 姓名: '张三', 操作类型: '修改', roundNo: 1, 原开始日期: '20260801', 原开始时间: '',
+    修改后开始日期: '2026-08-01', 修改后开始时间: '18:00', 修改后结束日期: '2026-08-01', 修改后结束时间: '21:00', 修改后上报加班时数: 3 };
+  const res = m.applyBatchOperations([op]);
+  assert.strictEqual(res.issues.length, 1);
+  assert.strictEqual(res.issues[0]['级别'], '多条命中');
+  assert.strictEqual(op['定位状态'], '多条命中(2)');
+  assert.strictEqual(JSON.stringify(appState.mergedRecords), before, '不改任何一条（当天合计也不能变）');
+});
+
+test('多条命中（调班）：同样不执行', () => {
+  resetState();
+  appState.mergedRecords = [
+    { 系统序号: 1, 工号: '10010001', 姓名: '张三', 加班开始日期: '2026-08-01', 加班开始时间: '15:45', 加班时数: 1.83 },
+    { 系统序号: 2, 工号: '10010001', 姓名: '张三', 加班开始日期: '2026-08-01', 加班开始时间: '20:00', 加班时数: 2 },
+  ];
+  const op = { 工号: '10010001', 姓名: '张三', 操作类型: '调班', roundNo: 1, 原开始日期: '20260801', 原开始时间: '', 调班日期: '20260801', 调班班次: 'OFF' };
+  const res = m.applyBatchOperations([op]);
+  assert.strictEqual(res.issues.length, 1);
+  assert.strictEqual(res.issues[0]['级别'], '多条命中');
+  assert.strictEqual(appState.mergedRecords.length, 2, '调班也不能挑一条动手');
 });
 
 test('修改 / 删除 / 调班 / 特殊情况混合执行，全部唯一定位且无定位异常', () => {
