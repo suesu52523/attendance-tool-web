@@ -3,7 +3,7 @@
 // 说明：js/main.js 是浏览器脚本（无模块导出），这里把源码包进一个函数并按需注入 XLSX / document /
 //      Blob / URL 桩，只测试不依赖真实浏览器环境的逻辑；导出函数用「捕获桩」记录生成的工作表，
 //      因此可以断言"没有数据时不会导出示例数据"这类行为。
-// 覆盖重点：异常表匹配（姓名不参与定位）、批量操作定位（业务键优先 + ID 回退 + 定位异常清单）、
+// 覆盖重点：异常表匹配（姓名不参与定位）、批量操作定位（只用业务键，序号不作身份；未定位/多条命中都不改数据）、
 //          重复执行保护、导出兜底保护。
 
 const fs = require('fs');
@@ -57,7 +57,7 @@ return {
   processGroupWorkbook, processAbnormalWorkbook, processRectifyWorkbook, confirmBatch,
   buildSystemRecords, buildShiftRecords,
   renderImport, renderAbnormal, renderRectify, renderOutput,
-  exportSystemData, exportRectify, exportShiftData, exportAbnormalFailures, exportLocateIssues,
+  exportSystemData, exportRectify, exportShiftData, exportAbnormalFailures, exportLocateIssues, exportOperationLog,
 };`);
 
 const m = factory(xlsxStub, documentStub, console);
@@ -578,7 +578,7 @@ test('姓名多一个字时仍按 工号+日期+时间 匹配成功，并给出�
   const rec = appState.abnormalRecords[0];
   const round = appState.rounds[0];
   assert.strictEqual(rec['匹配状态'], '已匹配');
-  assert.strictEqual(rec['系统序号'], 1);
+  assert.ok(!('系统序号' in rec), '异常记录不再带「系统序号」字段：序号不是身份，也不代表已处理');
   assert.strictEqual(round.abnormalFailures.length, 0);
   assert.strictEqual(round.abnormalWarnings.length, 1);
   assert.ok(round.abnormalWarnings[0]['定位提醒'].includes('不一致'));
@@ -589,7 +589,7 @@ test('异常表姓名为空时仍能匹配成功', () => {
   appState.mergedRecords = makeMergedRecords();
   m.processAbnormalWorkbook(abnormalParsed([[45, '10010002', '', '底盘一组', 20260802, '07:00', 20260802, '15:00', 8]]));
   assert.strictEqual(appState.abnormalRecords[0]['匹配状态'], '已匹配');
-  assert.strictEqual(appState.abnormalRecords[0]['系统序号'], 2);
+  assert.strictEqual(appState.rounds[0].abnormalWarnings.length, 0, '姓名空不产生不一致提醒');
 });
 
 test('工号不存在 / 日期差一天时进入失败清单', () => {
@@ -615,6 +615,7 @@ test('同工号同日多条且未填开始时间 → 标记「多条命中」并
   assert.strictEqual(appState.abnormalRecords[0]['匹配状态'], '多条命中(2)');
   assert.strictEqual(round.abnormalWarnings.length, 1);
   assert.ok(round.abnormalWarnings[0]['定位提醒'].includes('2 条'));
+  assert.ok(!round.abnormalWarnings[0]['定位提醒'].includes('已暂按'), '不能声称“已按序号处理”：多个候选时工具不会自己挑一条');
 });
 
 test('多条命中时，候选中与异常表科室一致的那条会被点名', () => {
@@ -671,6 +672,32 @@ test('未填写处置方式标记为「未填写」', () => {
   assert.strictEqual(appState.rectifyOperations[0]['操作类型'], '未填写');
 });
 
+// 空行（Excel 尾部常见）：班组表那条路早就跳过，异常表/整改表两条路必须同口径
+// 否则：整改表的空行会被当成「未填写」→ confirmBatch 整轮阻断，提示让人去补一条根本不存在的记录
+test('整改表尾部空行不算「未填写」：否则整轮被假阻断', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processRectifyWorkbook(rectifyParsed([
+    [45, '10010002', '李四', '底盘一组', 20260802, '07:00', 20260802, '15:00', 8, '删除', '', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''], // 尾部空行（真实样本 13 号表里就有）
+  ]));
+  assert.strictEqual(appState.rectifyOperations.length, 1, '空行不该产生操作记录');
+  assert.strictEqual(appState.rectifyOperations.filter(o => o['操作类型'] === '未填写').length, 0, '空行不算「未填写」');
+  m.confirmBatch();
+  assert.ok(!appState.mergedRecords.some(r => r['工号'] === '10010002'), '没被空行挡住，那一行照常执行');
+});
+
+test('异常表尾部空行不算记录，也不进「未匹配」清单', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([
+    [45, '10010002', '李四', '底盘一组', '20260802', '07:00', '20260802', '15:00', 8],
+    ['', '', '', '', '', '', '', '', ''],
+  ]));
+  assert.strictEqual(appState.abnormalRecords.length, 1, '空行不算数据行');
+  assert.strictEqual(appState.abnormalFailures.length, 0, '空行不该进匹配失败清单');
+});
+
 // ==================== 批量操作定位 ====================
 section('批量操作定位');
 
@@ -708,17 +735,33 @@ test('业务键找不到时记入定位异常清单，且不改动任何记录',
   assert.strictEqual(appState.mergedRecords.length, 4, '不应误删任何记录');
 });
 
-test('无原始日期时回退到 ID 等于系统序号', () => {
+test('序号对不上人时不许动手：工号查无此人 → 进未定位清单，不动任何记录', () => {
   resetState();
   appState.mergedRecords = makeMergedRecords();
+  // 整改表里工号 99999999 在大表中不存在，但序号 2 恰好是大表里的李四
+  // 口径（2026-09-17）：内部序号每次导入都从 1 重发、删除后还会重排（见 processGroupWorkbook / 删除分支），
+  // 拿它当身份会指到别人身上 —— 定位不到就进清单让人核对，不靠序号猜
   const op = { 系统序号: 2, 工号: '99999999', 姓名: '未知', 操作类型: '删除', roundNo: 1 };
   const res = m.applyBatchOperations([op]);
-  assert.strictEqual(res.issues.length, 0);
-  assert.strictEqual(op['定位状态'], '已定位(ID回退)');
-  assert.strictEqual(appState.mergedRecords.length, 3);
+  assert.strictEqual(res.issues.length, 1, '必须记入定位异常清单');
+  assert.strictEqual(res.issues[0]['级别'], '未定位');
+  assert.strictEqual(res.issues[0]['操作类型'], '删除');
+  assert.strictEqual(op['定位状态'], '未定位');
+  assert.strictEqual(appState.mergedRecords.length, 4, '不许删掉序号 2 那位（他不是本行要动的人）');
 });
 
-test('多条命中时列出候选序号，并只作用于第一条', () => {
+test('业务键缺日期时也不猜序号：仍然进清单，不动任何记录', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  // 工号、日期都没有可用的信息，只剩一个序号 —— 这种情况历史上“删错过人”
+  const op = { 系统序号: 3, 工号: '', 姓名: '王五', 操作类型: '删除', roundNo: 1 };
+  const res = m.applyBatchOperations([op]);
+  assert.strictEqual(res.issues.length, 1);
+  assert.strictEqual(res.issues[0]['级别'], '未定位');
+  assert.strictEqual(appState.mergedRecords.length, 4, '不应误删任何记录');
+});
+
+test('多条命中时列出候选序号，但不许自己挑一条动手（一条都不动）', () => {
   resetState();
   appState.mergedRecords = [
     { 系统序号: 1, 工号: '10010001', 姓名: '张三', 加班开始日期: '2026-08-01', 加班开始时间: '15:45', 加班时数: 1.83 },
@@ -728,9 +771,40 @@ test('多条命中时列出候选序号，并只作用于第一条', () => {
   const res = m.applyBatchOperations([op]);
   assert.strictEqual(res.issues.length, 1);
   assert.strictEqual(res.issues[0]['级别'], '多条命中');
-  assert.strictEqual(res.issues[0]['候选序号'], '1、2');
-  assert.strictEqual(appState.mergedRecords.length, 1);
-  assert.strictEqual(appState.mergedRecords[0]['加班开始时间'], '20:00', '只删掉第一条');
+  assert.strictEqual(res.issues[0]['候选序号'], '1、2', '仍要列出候选，方便人工核对');
+  assert.strictEqual(op['定位状态'], '多条命中(2)');
+  assert.strictEqual(appState.mergedRecords.length, 2, '挑不准就不许动手：两条都得留着');
+  assert.ok(res.issues[0]['说明'].includes('未执行'), '说明要写明“没执行”');
+  assert.ok(res.issues[0]['说明'].includes('原开始时间'), '并告诉人怎么消除歧义（补填原开始时间）');
+});
+
+test('多条命中（修改）：不执行修改，两条记录一个格都不许变', () => {
+  resetState();
+  appState.mergedRecords = [
+    { 系统序号: 1, 工号: '10010001', 姓名: '张三', 加班开始日期: '2026-08-01', 加班开始时间: '15:45', 加班结束日期: '2026-08-01', 加班结束时间: '18:45', 加班时数: 3 },
+    { 系统序号: 2, 工号: '10010001', 姓名: '张三', 加班开始日期: '2026-08-01', 加班开始时间: '20:00', 加班结束日期: '2026-08-01', 加班结束时间: '22:00', 加班时数: 2 },
+  ];
+  const before = JSON.stringify(appState.mergedRecords);
+  const op = { 工号: '10010001', 姓名: '张三', 操作类型: '修改', roundNo: 1, 原开始日期: '20260801', 原开始时间: '',
+    修改后开始日期: '2026-08-01', 修改后开始时间: '18:00', 修改后结束日期: '2026-08-01', 修改后结束时间: '21:00', 修改后上报加班时数: 3 };
+  const res = m.applyBatchOperations([op]);
+  assert.strictEqual(res.issues.length, 1);
+  assert.strictEqual(res.issues[0]['级别'], '多条命中');
+  assert.strictEqual(op['定位状态'], '多条命中(2)');
+  assert.strictEqual(JSON.stringify(appState.mergedRecords), before, '不改任何一条（当天合计也不能变）');
+});
+
+test('多条命中（调班）：同样不执行', () => {
+  resetState();
+  appState.mergedRecords = [
+    { 系统序号: 1, 工号: '10010001', 姓名: '张三', 加班开始日期: '2026-08-01', 加班开始时间: '15:45', 加班时数: 1.83 },
+    { 系统序号: 2, 工号: '10010001', 姓名: '张三', 加班开始日期: '2026-08-01', 加班开始时间: '20:00', 加班时数: 2 },
+  ];
+  const op = { 工号: '10010001', 姓名: '张三', 操作类型: '调班', roundNo: 1, 原开始日期: '20260801', 原开始时间: '', 调班日期: '20260801', 调班班次: 'OFF' };
+  const res = m.applyBatchOperations([op]);
+  assert.strictEqual(res.issues.length, 1);
+  assert.strictEqual(res.issues[0]['级别'], '多条命中');
+  assert.strictEqual(appState.mergedRecords.length, 2, '调班也不能挑一条动手');
 });
 
 test('修改 / 删除 / 调班 / 特殊情况混合执行，全部唯一定位且无定位异常', () => {
@@ -905,6 +979,101 @@ test('无法识别的处置方式记入清单，不再静默忽略', () => {
   assert.strictEqual(op['定位状态'], '未识别');
   assert.strictEqual(appState.mergedRecords.length, 4, '未识别的操作不应改动数据');
 });
+
+// ==================== M2-2：序号归位（校对单号 ≠ 大表序号） ====================
+section('校对单号 vs 大表序号');
+
+// 兑一份异常表：一条能对上（李四 8-02 07:00 → 大表序号 2），一条工号查无此人
+test('导出的整改表：ID 列写校对系统单号，不写大表序号', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([
+    [880001, '10010002', '李四', '底盘一组', '20260802', '07:00', '20260802', '15:00', 8],
+  ]));
+  captured = [];
+  m.exportRectify();
+  const sheet = captured.find(s => s.name.includes('底盘'));
+  assert.ok(sheet, '应导出底盘一组的 sheet');
+  const idIdx = sheet.rows[0].indexOf('ID');
+  assert.strictEqual(String(sheet.rows[1][idIdx]), '880001', 'ID 列必须还是校对系统给的 880001（旧代码这里写的是大表序号 2）');
+});
+
+test('整改表往返：定位到的操作，校对ID 仍是校对单号，系统序号 是实际改的那行', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([
+    [880001, '10010002', '李四', '底盘一组', '20260802', '07:00', '20260802', '15:00', 8],
+  ]));
+  captured = [];
+  m.exportRectify();
+  const sheet = captured.find(s => s.name.includes('底盘'));
+  const rows = sheet.rows.map(r => r.slice()); // 含真实表头，原样回传
+  rows[1][rows[0].indexOf('处置方式')] = '删除';
+  m.processRectifyWorkbook({ fileName: '整改表回传.xlsx', sheetNames: ['S1'], sheets: { S1: rows } });
+  const res = m.applyBatchOperations(appState.rectifyOperations);
+  const op = appState.rectifyOperations[0];
+  assert.deepStrictEqual(res.issues, [], '能唯一命中就不应有清单');
+  assert.strictEqual(op['定位状态'], '已定位(业务键)');
+  assert.strictEqual(String(op['校对ID']), '880001', '操作对象要带着校对单号，才能和校对系统对账');
+  assert.ok(!appState.mergedRecords.some(r => r['工号'] === '10010002'), '按业务键删掉李四那条');
+});
+
+test('定位异常清单：校对ID=校对单号；系统序号只在实际有目标行时填，定位不到就留空', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  // 手工填的整改表（或班组改过工号）：ID 是校对单号 901，但大表里没有 99999999 这个人
+  m.processRectifyWorkbook(rectifyParsed([
+    [901, '99999999', '徐阳', '底盘一组', '20260801', '15:45', '20260801', '17:35', 2, '删除'],
+    [902, '10010003', '王五', '底盘一组', '20260802', '', '20260802', '17:35', 1.83, '删除'],
+  ]));
+  const res = m.applyBatchOperations(appState.rectifyOperations);
+  const miss = res.issues.find(i => i['工号'] === '99999999');
+  assert.ok(miss, '查无此人 → 进清单');
+  assert.strictEqual(String(miss['校对ID']), '901', '校对ID 列应是校对单号');
+  assert.strictEqual(miss['系统序号'], '', '未定位就没有大表行号，不能拿校对单号冒充');
+  const multi = res.issues.find(i => i['工号'] === '10010003');
+  if (multi) {
+    assert.strictEqual(String(multi['校对ID']), '902');
+    assert.strictEqual(multi['系统序号'], 2, '多条命中时，系统序号 应是实际作用的那一行');
+  }
+});
+
+test('操作执行记录：列名叫校对ID，写的是校对单号（不再冒充大表序号）', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processRectifyWorkbook(rectifyParsed([
+    [901, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '17:35', 1.83, '删除'],
+  ]));
+  m.applyBatchOperations(appState.rectifyOperations);
+  captured = [];
+  m.exportOperationLog();
+  assert.deepStrictEqual(captured[0].rows[0], ['轮次', '校对ID', '工号', '姓名', '班组', '操作类型', '定位状态', '操作详情', '备注']);
+  assert.strictEqual(String(captured[0].rows[1][1]), '901');
+  assert.strictEqual(captured[0].rows[1][6], '已定位(业务键)', '定位状态列要写清这条到底执行没执行');
+});
+
+test('操作执行记录：没执行的操作也必须如实标出来（不能看起来像做了）', () => {
+  resetState();
+  const op = { 校对ID: 5, 工号: '10010099', 姓名: '查无', 班组: '未知', 操作类型: '删除', roundNo: 1, 原开始日期: '20260801', 原开始时间: '15:45', 定位状态: '未定位' };
+  appState.rounds = [{ roundNo: 1, rectifyOperations: [op] }];
+  captured = [];
+  m.exportOperationLog();
+  assert.strictEqual(captured[0].rows[1][6], '未定位', '没执行的必须写明未定位，不能让人以为删过了');
+});
+
+test('业务键定位仍然优先于任何号码：校对单号撞上别人也不改错人', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  // 校对单号 2 恰好等于大表里张三的序号，但业务键指向王五
+  m.processRectifyWorkbook(rectifyParsed([
+    [2, '10010003', '王五', '底盘一组', '20260802', '15:45', '20260802', '17:35', 1.83, '删除'],
+  ]));
+  const res = m.applyBatchOperations(appState.rectifyOperations);
+  assert.deepStrictEqual(res.issues, []);
+  assert.ok(!appState.mergedRecords.some(r => r['工号'] === '10010003'), '删的是王五');
+  assert.ok(appState.mergedRecords.some(r => r['工号'] === '10010001'), '不能误删张三');
+});
+
 
 // ==================== 导出保护 ====================
 section('导出保护');

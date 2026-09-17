@@ -649,18 +649,16 @@ function locateMergedRecords(empNo, startDate, startTime, records) {
   return candidates;
 }
 
-// 为一条整改操作定位合并大表中的目标记录
-// 定位优先级：① 业务键（工号 + 原开始日期 + 原开始时间） ② 回退：ID 等于系统序号
+// 为一条整改操作定位合并大表中的目标记录（定位异常清单里，“校对ID”是校对系统的单号，“系统序号”是大表行号，两者不是一回事）
+// 只用业务键（工号 + 原开始日期 + 原开始时间）：定位不到就返回未定位，由调用方写进《定位异常清单》让人核对
+// 为什么不回退到「序号」：大表的系统序号每次导入都从 1 重发、删除后还会重排
+//   （见 processGroupWorkbook 的 systemNo、applyBatchOperations 删除分支的重排序号）
+//   —— 它只是当次会话的排号，不是身份，旧文件里的号码会指到别人身上（历史上“删错人”就是这么来的）
+// ponytail: 若将来确实需要回填旧清单，用稳定的业务键（工号 + 日期）而不是序号
 // 返回 { target, method, hits, candidates }，target 为 null 表示未定位到
 function resolveOperationTarget(op) {
   const byKey = locateMergedRecords(op['工号'], op['原开始日期'], op['原开始时间']);
   if (byKey.length) return { target: byKey[0], method: '业务键', hits: byKey.length, candidates: byKey };
-
-  const id = String(op['系统序号'] === undefined || op['系统序号'] === null ? '' : op['系统序号']).trim();
-  if (id) {
-    const byId = appState.mergedRecords.filter(r => String(r['系统序号']) === id);
-    if (byId.length) return { target: byId[0], method: 'ID回退', hits: byId.length, candidates: byId };
-  }
 
   return { target: null, method: '未定位', hits: 0, candidates: [] };
 }
@@ -687,8 +685,8 @@ function buildLocateIssue(op, resolved, level, message) {
   const candidates = (resolved && resolved.candidates) || [];
   return {
     级别: level,
-    系统序号: op['系统序号'],
-    校对ID: op['系统序号'] || '',
+    系统序号: (resolved && resolved.target) ? resolved.target['系统序号'] : '',
+    校对ID: op['校对ID'] || '',
     工号: op['工号'],
     姓名: op['姓名'],
     班组: op['班组'],
@@ -744,10 +742,7 @@ function processGroupWorkbook(parsed) {
       const rowNum = idx + 2; // Excel 行号
 
       // 整行空白：Excel 里常见的空行，直接跳过（既不进合并表，也不计入校验失败）
-      const isBlankRow = Object.values(formatted).every(
-        v => String(v === undefined || v === null ? '' : v).trim() === ''
-      );
-      if (isBlankRow) return;
+      if (isBlankRow(formatted)) return;
 
       const startDate = formatted['加班开始日期'];
       const startTime = normalizeTime(formatted['加班开始时间']);
@@ -852,6 +847,14 @@ function processGroupWorkbook(parsed) {
 
 // ==================== 步骤 2：异常处理 ====================
 
+// 整行空白：Excel 的 used range 常带尾部空行（导出商、空格、格式残留都会造成）
+// 三条导入路径（班组表 / 异常表 / 整改表）统一用这一条：整行都没内容就当它不存在
+// 不跳过的后果：异常表里变成一条“未匹配”，整改表里变成一条“未填写”
+//   —— 而 confirmBatch 遇到“未填写”会整轮阻断，提示人去找一条根本不存在的记录
+function isBlankRow(rec) {
+  return Object.values(rec).every(v => String(v === undefined || v === null ? '' : v).trim() === '');
+}
+
 function processAbnormalWorkbook(parsed) {
   // 若当前轮次已确认，自动进入下一轮处理新的异常表
   const current = getCurrentRound();
@@ -873,6 +876,7 @@ function processAbnormalWorkbook(parsed) {
       Object.keys(obj).forEach(h => {
         rec[h] = formatCellValue(obj[h], h);
       });
+      if (isBlankRow(rec)) return; // 尾部空行：不算记录，也不进“未匹配”清单
       ABNORMAL_HEADERS.forEach(h => {
         if (!(h in rec)) rec[h] = '';
       });
@@ -897,12 +901,11 @@ function processAbnormalWorkbook(parsed) {
           失败原因: '无法在合并大表中匹配到对应记录（请核对工号、开始日期/时间）',
         });
       } else {
-        rec['系统序号'] = hits[0]['系统序号'];
         if (hits.length > 1) {
           warnings.push({
             ...rec,
             行号: idx + 2,
-            定位提醒: `合并大表中存在 ${hits.length} 条同工号同日期记录：${describeCandidates(hits)}，已暂按序号 ${hits[0]['系统序号']} 处理${buildDeptHint(hits, rec['科室'])}。若是同一条加班被重复填报到多个班组（一个人只应属于一个班组），请先清理合并大表；若确实是同一天两次加班，请在异常表补填「开始时间」以便唯一定位`,
+            定位提醒: `合并大表中存在 ${hits.length} 条同工号同日期记录：${describeCandidates(hits)}，尚未处理${buildDeptHint(hits, rec['科室'])}。若是同一条加班被重复填报到多个班组（一个人只应属于一个班组），请先清理合并大表；若确实是同一天两次加班，请在异常表补填「开始时间」以便唯一定位`,
           });
         }
         if (empName && String(hits[0]['姓名'] || '').trim() !== empName) {
@@ -943,6 +946,7 @@ function processRectifyWorkbook(parsed) {
       return rec;
     });
     objs.forEach(obj => {
+      if (isBlankRow(obj)) return; // 尾部空行：不算操作（否则会被当成“未填写”，整轮被假阻断）
       const type = String(obj['处置方式'] || '').trim();
       let detail = '';
       let opType = type;
@@ -967,7 +971,8 @@ function processRectifyWorkbook(parsed) {
       }
 
       operations.push({
-        系统序号: obj['ID'] || '',
+        // obj['ID'] 是校对系统给的单号（导出整改表时原样带出去、原样带回来），不是大表行号
+        校对ID: obj['ID'] || '',
         工号: String(obj['工号'] || '').trim(),
         姓名: obj['姓名'] || '',
         班组: name,
@@ -1322,7 +1327,7 @@ function renderAbnormal() {
           <i class="ph ph-info mt-0.5 text-lg"></i>
           <div>
             <div class="font-medium">有 ${warnings.length} 条记录需要人工核对</div>
-            <div class="text-apple-muted mt-1">存在同一工号同一天多条加班（已暂按第一条定位），或异常表姓名与合并大表不一致。请在下方「异常记录清单」核对「系统序号 / 匹配状态」两列，必要时下载清单交由组长确认。</div>
+            <div class="text-apple-muted mt-1">存在同一工号同一天多条加班（需要确认是哪一条），或异常表姓名与合并大表不一致。请在下方「异常记录清单」核对「匹配状态」列，必要时下载定位提醒交由组长确认。</div>
           </div>
         </div>
         <button onclick="exportAbnormalWarnings()" class="h-9 px-4 rounded-full bg-apple-orange/10 text-apple-orange text-xs font-medium hover:bg-apple-orange/20 transition-colors shrink-0">下载定位提醒</button>
@@ -1884,7 +1889,8 @@ function getOpBadgeClass(type) {
 function confirmBatch() {
   const round = getCurrentRound();
   // 本轮已执行过：必须禁止重复执行
-  // 合并大表在删除后会重新编排序号，重复执行同一份整改表会按旧 ID 改到/删掉别人的记录
+  // 同一批操作做第二遍会写在已经被改过的数据上（删除会重排大表序号、修改会改掉原业务键），结果正确性无法保证
+  // —— 宁可拦住，让人确认后再开新一轮
   if (round.status === 'confirmed' || appState.batchConfirmed) {
     showToast('本轮批量操作已执行过，不能重复执行。如需重做，请先点「开始新一轮处理」并重新导入整改表', 'error');
     return;
@@ -1929,7 +1935,7 @@ function confirmBatch() {
 }
 
 // 将整改操作应用到合并大表
-// 定位优先级：① 业务键（工号 + 原开始日期 + 原开始时间） ② 回退：ID 等于系统序号
+// 定位只用业务键（工号 + 原开始日期 + 原开始时间），见 resolveOperationTarget：序号不是身份，定位不到就进清单
 // 返回 { applied, issues }；未定位/多条命中的操作会记录到 issues，不再静默跳过
 function applyBatchOperations(operations) {
   const issues = [];
@@ -1955,12 +1961,13 @@ function applyBatchOperations(operations) {
       return;
     }
     if (resolved.hits > 1) {
+      // 同工号同日期多条 = 挑不准是哪一条：宁可不改（改错行会算错当天工时），退回让人补「原开始时间」
       op['定位状态'] = `多条命中(${resolved.hits})`;
       issues.push(buildLocateIssue(op, resolved, '多条命中',
-        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，修改仅作用于序号 ${resolved.target['系统序号']}，请人工确认${buildDeptHint(resolved.candidates, op['班组'])}`));
-    } else {
-      op['定位状态'] = `已定位(${resolved.method})`;
+        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，修改未执行。请补填「原开始时间」以唯一定位后重新导入${buildDeptHint(resolved.candidates, op['班组'])}`));
+      return;
     }
+    op['定位状态'] = `已定位(${resolved.method})`;
 
     const target = resolved.target;
     const startDate = normalizeDate(op['修改后开始日期']);
@@ -2018,12 +2025,13 @@ function applyBatchOperations(operations) {
       return;
     }
     if (resolved.hits > 1) {
+      // 同上：删错行不可逆，宁可不删；人补齐「原开始时间」后重导自然能唯一定位
       op['定位状态'] = `多条命中(${resolved.hits})`;
       issues.push(buildLocateIssue(op, resolved, '多条命中',
-        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，仅对序号 ${resolved.target['系统序号']} 执行${op['操作类型']}，请人工确认${buildDeptHint(resolved.candidates, op['班组'])}`));
-    } else {
-      op['定位状态'] = `已定位(${resolved.method})`;
+        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，${op['操作类型']}未执行。请补填「原开始时间」以唯一定位后重新导入${buildDeptHint(resolved.candidates, op['班组'])}`));
+      return;
     }
+    op['定位状态'] = `已定位(${resolved.method})`;
     removeTargets.add(resolved.target);
   });
 
@@ -2230,8 +2238,8 @@ function exportRectify() {
   Object.keys(groups).forEach(group => {
     const rows = groups[group].map(r => {
       return headers.map(h => {
-        // ID 列写入合并大表的系统序号，确保整改回传后能按系统序号正确定位
-        if (h === 'ID') return r['系统序号'] !== undefined ? r['系统序号'] : (r['ID'] !== undefined ? r['ID'] : '');
+        // ID 列原样导出校对系统单号：不要拿大表系统序号覆盖它
+        // （序号只是当次会话的排号，每次导入重发、删除后重排；覆盖掉单号后班组与考勤员就没法跟校对系统对账）
         if (ABNORMAL_HEADERS.includes(h)) return r[h] !== undefined ? r[h] : '';
         return '';
       });
@@ -2321,9 +2329,11 @@ function exportOperationLog() {
     showToast('暂无操作记录，请先执行批量操作', 'error');
     return false;
   }
-  const headers = ['轮次', '系统序号', '工号', '姓名', '班组', '操作类型', '操作详情', '备注'];
+  // 定位状态列：只有「已定位(…)」是真执行过的；未定位 / 多条命中 / 未识别 / 待定位 都是"没动手"
+  // （M2-3 起多条命中不再挑一条执行，所以这份记录必须能区分"记了"和"做了"）
+  const headers = ['轮次', '校对ID', '工号', '姓名', '班组', '操作类型', '定位状态', '操作详情', '备注'];
   const rows = ops.map(op => [
-    op['roundNo'] || 1, op['系统序号'], op['工号'], op['姓名'], op['班组'], op['操作类型'], op['操作详情'], op['备注'] || ''
+    op['roundNo'] || 1, op['校对ID'], op['工号'], op['姓名'], op['班组'], op['操作类型'], op['定位状态'] || '', op['操作详情'], op['备注'] || ''
   ]);
 
   const wb = XLSX.utils.book_new();
