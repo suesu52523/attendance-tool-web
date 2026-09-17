@@ -552,7 +552,11 @@ function formatCellValue(value, header) {
     const formatted = excelDateToString(value);
     if (formatted) return formatted;
   }
-  if (h.includes('时间') && typeof value === 'number') {
+  // 「时数」列存的是小时数（0.5 = 半小时），不是钟点 —— 不能按 h:mm 格式化。
+  // 典型陷阱：「实际加班时数(未减吃饭时间)」，列名里的“时间”来自“未减吃饭时间”。
+  // ponytail: 此处靠列名约定判断；一旦出现名字里不含「时数」的小时列就会退化。
+  //            升级路径 = 读单元格自带的数字格式（SheetJS cellNF + SSF.is_date），不再猜列名。
+  if (h.includes('时间') && !h.includes('时数') && typeof value === 'number') {
     const formatted = excelTimeToString(value);
     if (formatted) return formatted;
   }

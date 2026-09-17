@@ -16,7 +16,11 @@ const src = fs.readFileSync(MAIN_JS, 'utf8');
 // ---------- 桩 ----------
 let captured = [];
 const xlsxStub = {
-  SSF: { format: () => '' },
+  // 只模拟测试用到的那一种格式：'h:mm' 按真实 XLSX 的行为来（0.5 → "12:00"，小时不补零），
+  // 其余格式返回空串。注意：如果这里永远返回空串，「时数列被当成钟点」的 bug 测不出来（假绿）。
+  SSF: { format: (fmt, v) => (fmt === 'h:mm'
+    ? `${Math.floor(v * 24)}:${String(Math.round(v * 1440) % 60).padStart(2, '0')}`
+    : '') },
   utils: {
     book_new: () => ({}),
     aoa_to_sheet: (rows) => ({ rows }),
@@ -45,6 +49,7 @@ const factory = new Function('XLSX', 'document', 'console', `${src}
 return {
   appState,
   toYYYYMMDD, normalizeDate, normalizeTime, padTime, parseDateParts, parseTimeParts, computeHours,
+  formatCellValue,
   locateMergedRecords, resolveOperationTarget, applyBatchOperations,
   processGroupWorkbook, processAbnormalWorkbook, processRectifyWorkbook, confirmBatch,
   buildSystemRecords, buildShiftRecords,
@@ -133,6 +138,54 @@ test('toYYYYMMDD 整串匹配，不再把 2026/8/10x 截成合法日期', () => 
   assert.strictEqual(m.toYYYYMMDD('2026/8/1'), '20260801');
   assert.strictEqual(m.toYYYYMMDD(20260801), '20260801');
   assert.ok(!/^\d{8}$/.test(m.toYYYYMMDD('2026/8/10x')), '带尾巴的日期不应被当成合法 8 位日期');
+});
+
+// ==================== 时数列不能被当成钟点（M1 问题 3） ====================
+// 来源：docs/排查/M1-问题说明.html 的问题 3。
+// 根因：「实际加班时数(未减吃饭时间)」列名里的“时间”来自“未减吃饭时间”，它其实是小时数。
+section('时数列不能被当成钟点（M1 问题 3）');
+
+test('时数列里的不足 1 小时不能被当成钟点显示', () => {
+  const col = '实际加班时数(未减吃饭时间)';
+  assert.strictEqual(m.formatCellValue(0.5, col), 0.5, '0.5 小时不能变成 "12:00"');
+  assert.strictEqual(m.formatCellValue(0.25, col), 0.25, '0.25 小时不能变成 "6:00"');
+  assert.strictEqual(m.formatCellValue(0.9, col), 0.9, '0.9 小时不能变成 "21:36"');
+  assert.strictEqual(m.formatCellValue(1.5, '加班时数'), 1.5, '本来不含「时间」的时数列不受影响');
+  assert.strictEqual(m.formatCellValue(8, '上报加班时数'), 8);
+});
+
+test('真正的钟点列仍按 h:mm 转换（不能顺手把它关掉）', () => {
+  assert.strictEqual(m.formatCellValue(22 / 24, '加班开始时间'), '22:00');
+  assert.strictEqual(m.formatCellValue(15.75 / 24, '加班结束时间'), '15:45');
+  assert.strictEqual(m.formatCellValue(0, '加班开始时间'), '0:00');
+});
+
+test('发给班组的整改表里，实际加班时数那一格是 0.5（不是 12:00）', () => {
+  resetState();
+  // 异常表要能匹配上，否则会被排除在整改表之外
+  appState.mergedRecords = [{
+    系统序号: 1, 工号: '00163613', 姓名: '王义', 班组: '车门A组',
+    加班开始日期: '2026-08-05', 加班开始时间: '15:45',
+    加班结束日期: '2026-08-05', 加班结束时间: '18:45', 加班时数: 3,
+  }];
+  m.processAbnormalWorkbook({
+    fileName: '异常表.xlsx', sheetNames: ['异常记录'],
+    sheets: { 异常记录: [
+      ['ID', '工号', '姓名', '科室', 'T0日*系统排班', '开始加班打卡时间', '结束加班打卡时间',
+        '开始日期', '结束日期', '开始时间', '结束时间', '上报加班时数', '实际加班时数(未减吃饭时间)', '差异', '提醒信息'],
+      [45, '00163613', '王义', '车门A组', '双班早班 2026-08-05 07:00:00~2026-08-05 15:45:00', '',
+        '2026-08-05 16:56:29', 20260805, 20260805, '15:45', '18:45', 3, 0.5, 2.5, '【加班时数差异】上报与打卡不符;'],
+    ] },
+  });
+  m.exportRectify();
+  assert.strictEqual(captured.length, 1, '应导出 1 个班组 sheet');
+  const headers = captured[0].rows[0];
+  const row = captured[0].rows[1];
+  const i = headers.indexOf('实际加班时数(未减吃饭时间)');
+  assert.ok(i > -1, '整改表应带上异常表整列');
+  assert.strictEqual(row[i], 0.5, '这一格必须是 0.5，不能是 "12:00"');
+  assert.strictEqual(row[headers.indexOf('上报加班时数')], 3, '同一行的其它时数不能被动到');
+  assert.strictEqual(row[headers.indexOf('开始时间')], '15:45', '同一行的钟点列照旧');
 });
 
 // ==================== 合并大表定位 ====================
