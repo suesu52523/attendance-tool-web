@@ -129,11 +129,16 @@ test('17 个班组 sheet、241 条记录、无校验失败', () => {
 // ==================== 场景 2：02-班组填报-校验失败 ====================
 section('场景2  02-班组填报-校验失败.xlsx（校验与容错）');
 
-test('30 行数据：校验失败 17 条、进入合并 11 条', () => {
+test('30 行数据：校验失败 16 条、进入合并 12 条（中文日期被认下后少退回 1 条）', () => {
   resetAll();
   m.processGroupWorkbook(file('02-班组填报-校验失败.xlsx'));
-  assert.strictEqual(appState.groupFailures.length, 17);
-  assert.strictEqual(appState.mergedRecords.length, 11);
+  // 口径变更（M1-6，2026-09-17 业务确认）：中文日期认下来，
+  // 「内装A1组 行8」的 2026年8月10日 不再退回，所以 失败 17→16、合并 11→12
+  assert.strictEqual(appState.groupFailures.length, 16);
+  assert.strictEqual(appState.mergedRecords.length, 12);
+  const accepted = appState.mergedRecords.find(r => String(r['工号']) === '00119904');
+  assert.ok(accepted, '中文日期那行应该进合并大表');
+  assert.strictEqual(accepted['加班开始日期'], '2026-08-10', '中文日期要统一成短横线写法');
 });
 
 test('完全空行不再被记成「6 项缺失」的校验失败', () => {

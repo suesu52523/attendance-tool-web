@@ -135,6 +135,75 @@ test('toYYYYMMDD 整串匹配，不再把 2026/8/10x 截成合法日期', () => 
   assert.ok(!/^\d{8}$/.test(m.toYYYYMMDD('2026/8/10x')), '带尾巴的日期不应被当成合法 8 位日期');
 });
 
+// ==================== 中文日期（M1-6） ====================
+// 业务口径（2026-09-17）：中文日期认下来，往全了做。
+// 真实来源：样本 02-班组填报-校验失败.xlsx / 内装A1组 行8 写的就是 "2026年8月10日"，
+//          过去一律退回让班组重填（手工誊写到系统里平白多一步）。
+// 口径：只认“年月日 / 年月号”这一种；日期不存在的（2026年2月30日）仍然退回。
+section('中文日期（M1-6）');
+
+const CN_HEADERS = ['序号', '工号', '姓名', '班组', '加班开始日期', '加班开始时间',
+  '加班结束日期', '加班结束时间', '加班时数', '加班原因', '加班类别', '科负责人核准'];
+function groupWorkbookWithDateText(startDate, endDate) {
+  return { fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    CN_HEADERS,
+    [1, '10010001', '张三', '一组', startDate, '15:45', endDate, '18:45', '', '产能爬坡', '工作日', '核准'],
+  ] } };
+}
+
+test('中文日期 2026年8月10日 被认下，并统一成 2026-08-10', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithDateText('2026年8月10日', '2026年8月10日'));
+  assert.strictEqual(appState.groupFailures.length, 0, '中文日期不该再被退回');
+  assert.strictEqual(appState.mergedRecords.length, 1);
+  assert.strictEqual(appState.mergedRecords[0]['加班开始日期'], '2026-08-10', '大表里要统一成短横线写法');
+  assert.strictEqual(appState.mergedRecords[0]['加班时数'], 3, '算工时也要能算出来');
+  assert.strictEqual(m.buildSystemRecords(appState.mergedRecords)[0]['开始日期'], '20260810', '导出的 2007 表要是 8 位');
+});
+
+test('中文日期的各种写法（往全了做）', () => {
+  const forms = ['2026年08月10日', '2026年8月10号', '2026 年 8 月 10 日', '２０２６年８月１０日', '2026年8月10日 '];
+  for (const f of forms) {
+    resetState();
+    m.processGroupWorkbook(groupWorkbookWithDateText(f, f));
+    assert.strictEqual(appState.mergedRecords.length, 1, `${f} 应该被认下`);
+    assert.strictEqual(appState.mergedRecords[0]['加班开始日期'], '2026-08-10', `${f} 应该归一`);
+  }
+});
+
+test('中文写法但日期不存在（2026年2月30日）仍要退回', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithDateText('2026年2月30日', '2026年2月30日'));
+  assert.strictEqual(appState.mergedRecords.length, 0, '不能把 2 月 30 日洗成看起来合法的日期');
+  assert.strictEqual(appState.groupFailures.length, 1);
+});
+
+test('既有写法行为不变（短横线 / 8 位 / 斜线）', () => {
+  for (const f of ['2026-08-10', '20260810', '2026/8/10']) {
+    resetState();
+    m.processGroupWorkbook(groupWorkbookWithDateText(f, f));
+    assert.strictEqual(appState.mergedRecords.length, 1, `${f} 应该照旧放行`);
+    assert.strictEqual(appState.mergedRecords[0]['加班开始日期'], f, `${f} 不该被改动`);
+    assert.strictEqual(m.buildSystemRecords(appState.mergedRecords)[0]['开始日期'], '20260810');
+  }
+});
+
+test('整改表里的中文日期同样归一（端到端）', () => {
+  resetState();
+  m.processRectifyWorkbook(rectifyParsed([[1, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '18:45', 3,
+    '修改', '2026年8月10日', '15:45', '2026年8月10日', '18:45', '', '', '', '']]));
+  assert.strictEqual(appState.rectifyOperations[0]['修改后开始日期'], '2026-08-10', '导入时就该归一');
+  appState.mergedRecords = [{
+    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '底盘一组',
+    加班开始日期: '2026-08-01', 加班开始时间: '15:45',
+    加班结束日期: '2026-08-01', 加班结束时间: '18:45', 加班时数: 3,
+  }];
+  const res = m.applyBatchOperations(appState.rectifyOperations);
+  assert.strictEqual(res.issues.length, 0, '中文日期不该被当成异常');
+  assert.strictEqual(appState.mergedRecords[0]['加班开始日期'], '2026-08-10');
+  assert.strictEqual(m.buildSystemRecords(appState.mergedRecords)[0]['开始日期'], '20260810');
+});
+
 // ==================== 合并大表定位 ====================
 section('合并大表定位（业务键）');
 
