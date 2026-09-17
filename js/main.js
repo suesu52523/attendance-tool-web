@@ -699,10 +699,7 @@ function processGroupWorkbook(parsed) {
       const rowNum = idx + 2; // Excel 行号
 
       // 整行空白：Excel 里常见的空行，直接跳过（既不进合并表，也不计入校验失败）
-      const isBlankRow = Object.values(formatted).every(
-        v => String(v === undefined || v === null ? '' : v).trim() === ''
-      );
-      if (isBlankRow) return;
+      if (isBlankRow(formatted)) return;
 
       const startDate = formatted['加班开始日期'];
       const startTime = normalizeTime(formatted['加班开始时间']);
@@ -796,6 +793,14 @@ function processGroupWorkbook(parsed) {
 
 // ==================== 步骤 2：异常处理 ====================
 
+// 整行空白：Excel 的 used range 常带尾部空行（导出商、空格、格式残留都会造成）
+// 三条导入路径（班组表 / 异常表 / 整改表）统一用这一条：整行都没内容就当它不存在
+// 不跳过的后果：异常表里变成一条“未匹配”，整改表里变成一条“未填写”
+//   —— 而 confirmBatch 遇到“未填写”会整轮阻断，提示人去找一条根本不存在的记录
+function isBlankRow(rec) {
+  return Object.values(rec).every(v => String(v === undefined || v === null ? '' : v).trim() === '');
+}
+
 function processAbnormalWorkbook(parsed) {
   // 若当前轮次已确认，自动进入下一轮处理新的异常表
   const current = getCurrentRound();
@@ -817,6 +822,7 @@ function processAbnormalWorkbook(parsed) {
       Object.keys(obj).forEach(h => {
         rec[h] = formatCellValue(obj[h], h);
       });
+      if (isBlankRow(rec)) return; // 尾部空行：不算记录，也不进“未匹配”清单
       ABNORMAL_HEADERS.forEach(h => {
         if (!(h in rec)) rec[h] = '';
       });
@@ -887,6 +893,7 @@ function processRectifyWorkbook(parsed) {
       return rec;
     });
     objs.forEach(obj => {
+      if (isBlankRow(obj)) return; // 尾部空行：不算操作（否则会被当成“未填写”，整轮被假阻断）
       const type = String(obj['处置方式'] || '').trim();
       let detail = '';
       let opType = type;

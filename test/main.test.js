@@ -273,6 +273,32 @@ test('未填写处置方式标记为「未填写」', () => {
   assert.strictEqual(appState.rectifyOperations[0]['操作类型'], '未填写');
 });
 
+// 空行（Excel 尾部常见）：班组表那条路早就跳过，异常表/整改表两条路必须同口径
+// 否则：整改表的空行会被当成「未填写」→ confirmBatch 整轮阻断，提示让人去补一条根本不存在的记录
+test('整改表尾部空行不算「未填写」：否则整轮被假阻断', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processRectifyWorkbook(rectifyParsed([
+    [45, '10010002', '李四', '底盘一组', 20260802, '07:00', 20260802, '15:00', 8, '删除', '', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''], // 尾部空行（真实样本 13 号表里就有）
+  ]));
+  assert.strictEqual(appState.rectifyOperations.length, 1, '空行不该产生操作记录');
+  assert.strictEqual(appState.rectifyOperations.filter(o => o['操作类型'] === '未填写').length, 0, '空行不算「未填写」');
+  m.confirmBatch();
+  assert.ok(!appState.mergedRecords.some(r => r['工号'] === '10010002'), '没被空行挡住，那一行照常执行');
+});
+
+test('异常表尾部空行不算记录，也不进「未匹配」清单', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([
+    [45, '10010002', '李四', '底盘一组', '20260802', '07:00', '20260802', '15:00', 8],
+    ['', '', '', '', '', '', '', '', ''],
+  ]));
+  assert.strictEqual(appState.abnormalRecords.length, 1, '空行不算数据行');
+  assert.strictEqual(appState.abnormalFailures.length, 0, '空行不该进匹配失败清单');
+});
+
 // ==================== 批量操作定位 ====================
 section('批量操作定位');
 

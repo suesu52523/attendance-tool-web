@@ -242,13 +242,15 @@ test('删除 / 修改 都按业务键定位到整改表里写的那个人（不�
 // ==================== 场景 5：13-整改表-定位异常 ====================
 section('场景5  13-整改表-定位异常.xlsx（ID=901… 与合并大表序号无关）');
 
-test('25 条操作：13 条按业务键定位、2 条未填写、10 条进入定位异常清单', () => {
+test('24 条操作：13 条按业务键定位、1 条未填写、10 条进入定位异常清单', () => {
   resetAll();
   m.processGroupWorkbook(file('01-班组填报-正常.xlsx'));
   m.processRectifyWorkbook(file('13-整改表-定位异常.xlsx'));
   const ops = appState.rectifyOperations;
-  assert.strictEqual(ops.length, 25);
-  assert.deepStrictEqual(countBy(ops, '操作类型'), { 修改: 20, 删除: 3, 未填写: 2 });
+  // 24 条（旧数 25）：源文件尾部那个全空行不再算成一条操作
+  // 【口径变更】空行不是数据：旧行为会把它当成“未填写处置方式”并阻断整轮，提示人去找一条根本不存在的记录
+  assert.strictEqual(ops.length, 24);
+  assert.deepStrictEqual(countBy(ops, '操作类型'), { 修改: 20, 删除: 3, 未填写: 1 });
 
   const before = snap();
   const res = m.applyBatchOperations(ops);
