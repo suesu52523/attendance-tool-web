@@ -607,17 +607,15 @@ function locateMergedRecords(empNo, startDate, startTime, records) {
 }
 
 // 为一条整改操作定位合并大表中的目标记录
-// 定位优先级：① 业务键（工号 + 原开始日期 + 原开始时间） ② 回退：ID 等于系统序号
+// 只用业务键（工号 + 原开始日期 + 原开始时间）：定位不到就返回未定位，由调用方写进《定位异常清单》让人核对
+// 为什么不回退到「序号」：大表的系统序号每次导入都从 1 重发、删除后还会重排
+//   （见 processGroupWorkbook 的 systemNo、applyBatchOperations 删除分支的重排序号）
+//   —— 它只是当次会话的排号，不是身份，旧文件里的号码会指到别人身上（历史上“删错人”就是这么来的）
+// ponytail: 若将来确实需要回填旧清单，用稳定的业务键（工号 + 日期）而不是序号
 // 返回 { target, method, hits, candidates }，target 为 null 表示未定位到
 function resolveOperationTarget(op) {
   const byKey = locateMergedRecords(op['工号'], op['原开始日期'], op['原开始时间']);
   if (byKey.length) return { target: byKey[0], method: '业务键', hits: byKey.length, candidates: byKey };
-
-  const id = String(op['系统序号'] === undefined || op['系统序号'] === null ? '' : op['系统序号']).trim();
-  if (id) {
-    const byId = appState.mergedRecords.filter(r => String(r['系统序号']) === id);
-    if (byId.length) return { target: byId[0], method: 'ID回退', hits: byId.length, candidates: byId };
-  }
 
   return { target: null, method: '未定位', hits: 0, candidates: [] };
 }

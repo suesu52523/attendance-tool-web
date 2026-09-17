@@ -310,14 +310,30 @@ test('业务键找不到时记入定位异常清单，且不改动任何记录',
   assert.strictEqual(appState.mergedRecords.length, 4, '不应误删任何记录');
 });
 
-test('无原始日期时回退到 ID 等于系统序号', () => {
+test('序号对不上人时不许动手：工号查无此人 → 进未定位清单，不动任何记录', () => {
   resetState();
   appState.mergedRecords = makeMergedRecords();
+  // 整改表里工号 99999999 在大表中不存在，但序号 2 恰好是大表里的李四
+  // 口径（2026-09-17）：内部序号每次导入都从 1 重发、删除后还会重排（见 processGroupWorkbook / 删除分支），
+  // 拿它当身份会指到别人身上 —— 定位不到就进清单让人核对，不靠序号猜
   const op = { 系统序号: 2, 工号: '99999999', 姓名: '未知', 操作类型: '删除', roundNo: 1 };
   const res = m.applyBatchOperations([op]);
-  assert.strictEqual(res.issues.length, 0);
-  assert.strictEqual(op['定位状态'], '已定位(ID回退)');
-  assert.strictEqual(appState.mergedRecords.length, 3);
+  assert.strictEqual(res.issues.length, 1, '必须记入定位异常清单');
+  assert.strictEqual(res.issues[0]['级别'], '未定位');
+  assert.strictEqual(res.issues[0]['操作类型'], '删除');
+  assert.strictEqual(op['定位状态'], '未定位');
+  assert.strictEqual(appState.mergedRecords.length, 4, '不许删掉序号 2 那位（他不是本行要动的人）');
+});
+
+test('业务键缺日期时也不猜序号：仍然进清单，不动任何记录', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  // 工号、日期都没有可用的信息，只剩一个序号 —— 这种情况历史上“删错过人”
+  const op = { 系统序号: 3, 工号: '', 姓名: '王五', 操作类型: '删除', roundNo: 1 };
+  const res = m.applyBatchOperations([op]);
+  assert.strictEqual(res.issues.length, 1);
+  assert.strictEqual(res.issues[0]['级别'], '未定位');
+  assert.strictEqual(appState.mergedRecords.length, 4, '不应误删任何记录');
 });
 
 test('多条命中时列出候选序号，并只作用于第一条', () => {
