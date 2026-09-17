@@ -606,7 +606,7 @@ function locateMergedRecords(empNo, startDate, startTime, records) {
   return candidates;
 }
 
-// 为一条整改操作定位合并大表中的目标记录
+// 为一条整改操作定位合并大表中的目标记录（定位异常清单里，“校对ID”是校对系统的单号，“系统序号”是大表行号，两者不是一回事）
 // 只用业务键（工号 + 原开始日期 + 原开始时间）：定位不到就返回未定位，由调用方写进《定位异常清单》让人核对
 // 为什么不回退到「序号」：大表的系统序号每次导入都从 1 重发、删除后还会重排
 //   （见 processGroupWorkbook 的 systemNo、applyBatchOperations 删除分支的重排序号）
@@ -642,8 +642,8 @@ function buildLocateIssue(op, resolved, level, message) {
   const candidates = (resolved && resolved.candidates) || [];
   return {
     级别: level,
-    系统序号: op['系统序号'],
-    校对ID: op['系统序号'] || '',
+    系统序号: (resolved && resolved.target) ? resolved.target['系统序号'] : '',
+    校对ID: op['校对ID'] || '',
     工号: op['工号'],
     姓名: op['姓名'],
     班组: op['班组'],
@@ -911,7 +911,8 @@ function processRectifyWorkbook(parsed) {
       }
 
       operations.push({
-        系统序号: obj['ID'] || '',
+        // obj['ID'] 是校对系统给的单号（导出整改表时原样带出去、原样带回来），不是大表行号
+        校对ID: obj['ID'] || '',
         工号: String(obj['工号'] || '').trim(),
         姓名: obj['姓名'] || '',
         班组: name,
@@ -2144,8 +2145,8 @@ function exportRectify() {
   Object.keys(groups).forEach(group => {
     const rows = groups[group].map(r => {
       return headers.map(h => {
-        // ID 列写入合并大表的系统序号，确保整改回传后能按系统序号正确定位
-        if (h === 'ID') return r['系统序号'] !== undefined ? r['系统序号'] : (r['ID'] !== undefined ? r['ID'] : '');
+        // ID 列原样导出校对系统单号：不要拿大表系统序号覆盖它
+        // （序号只是当次会话的排号，每次导入重发、删除后重排；覆盖掉单号后班组与考勤员就没法跟校对系统对账）
         if (ABNORMAL_HEADERS.includes(h)) return r[h] !== undefined ? r[h] : '';
         return '';
       });
@@ -2235,9 +2236,9 @@ function exportOperationLog() {
     showToast('暂无操作记录，请先执行批量操作', 'error');
     return false;
   }
-  const headers = ['轮次', '系统序号', '工号', '姓名', '班组', '操作类型', '操作详情', '备注'];
+  const headers = ['轮次', '校对ID', '工号', '姓名', '班组', '操作类型', '操作详情', '备注'];
   const rows = ops.map(op => [
-    op['roundNo'] || 1, op['系统序号'], op['工号'], op['姓名'], op['班组'], op['操作类型'], op['操作详情'], op['备注'] || ''
+    op['roundNo'] || 1, op['校对ID'], op['工号'], op['姓名'], op['班组'], op['操作类型'], op['操作详情'], op['备注'] || ''
   ]);
 
   const wb = XLSX.utils.book_new();

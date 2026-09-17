@@ -49,7 +49,7 @@ return {
   processGroupWorkbook, processAbnormalWorkbook, processRectifyWorkbook, confirmBatch,
   buildSystemRecords, buildShiftRecords,
   renderImport, renderAbnormal, renderRectify, renderOutput,
-  exportSystemData, exportRectify, exportShiftData, exportAbnormalFailures, exportLocateIssues,
+  exportSystemData, exportRectify, exportShiftData, exportAbnormalFailures, exportLocateIssues, exportOperationLog,
 };`);
 
 const m = factory(xlsxStub, documentStub, console);
@@ -524,6 +524,91 @@ test('无法识别的处置方式记入清单，不再静默忽略', () => {
   assert.strictEqual(op['定位状态'], '未识别');
   assert.strictEqual(appState.mergedRecords.length, 4, '未识别的操作不应改动数据');
 });
+
+// ==================== M2-2：序号归位（校对单号 ≠ 大表序号） ====================
+section('校对单号 vs 大表序号');
+
+// 兑一份异常表：一条能对上（李四 8-02 07:00 → 大表序号 2），一条工号查无此人
+test('导出的整改表：ID 列写校对系统单号，不写大表序号', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([
+    [880001, '10010002', '李四', '底盘一组', '20260802', '07:00', '20260802', '15:00', 8],
+  ]));
+  captured = [];
+  m.exportRectify();
+  const sheet = captured.find(s => s.name.includes('底盘'));
+  assert.ok(sheet, '应导出底盘一组的 sheet');
+  const idIdx = sheet.rows[0].indexOf('ID');
+  assert.strictEqual(String(sheet.rows[1][idIdx]), '880001', 'ID 列必须还是校对系统给的 880001（旧代码这里写的是大表序号 2）');
+});
+
+test('整改表往返：定位到的操作，校对ID 仍是校对单号，系统序号 是实际改的那行', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([
+    [880001, '10010002', '李四', '底盘一组', '20260802', '07:00', '20260802', '15:00', 8],
+  ]));
+  captured = [];
+  m.exportRectify();
+  const sheet = captured.find(s => s.name.includes('底盘'));
+  const rows = sheet.rows.map(r => r.slice()); // 含真实表头，原样回传
+  rows[1][rows[0].indexOf('处置方式')] = '删除';
+  m.processRectifyWorkbook({ fileName: '整改表回传.xlsx', sheetNames: ['S1'], sheets: { S1: rows } });
+  const res = m.applyBatchOperations(appState.rectifyOperations);
+  const op = appState.rectifyOperations[0];
+  assert.deepStrictEqual(res.issues, [], '能唯一命中就不应有清单');
+  assert.strictEqual(op['定位状态'], '已定位(业务键)');
+  assert.strictEqual(String(op['校对ID']), '880001', '操作对象要带着校对单号，才能和校对系统对账');
+  assert.ok(!appState.mergedRecords.some(r => r['工号'] === '10010002'), '按业务键删掉李四那条');
+});
+
+test('定位异常清单：校对ID=校对单号；系统序号只在实际有目标行时填，定位不到就留空', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  // 手工填的整改表（或班组改过工号）：ID 是校对单号 901，但大表里没有 99999999 这个人
+  m.processRectifyWorkbook(rectifyParsed([
+    [901, '99999999', '徐阳', '底盘一组', '20260801', '15:45', '20260801', '17:35', 2, '删除'],
+    [902, '10010003', '王五', '底盘一组', '20260802', '', '20260802', '17:35', 1.83, '删除'],
+  ]));
+  const res = m.applyBatchOperations(appState.rectifyOperations);
+  const miss = res.issues.find(i => i['工号'] === '99999999');
+  assert.ok(miss, '查无此人 → 进清单');
+  assert.strictEqual(String(miss['校对ID']), '901', '校对ID 列应是校对单号');
+  assert.strictEqual(miss['系统序号'], '', '未定位就没有大表行号，不能拿校对单号冒充');
+  const multi = res.issues.find(i => i['工号'] === '10010003');
+  if (multi) {
+    assert.strictEqual(String(multi['校对ID']), '902');
+    assert.strictEqual(multi['系统序号'], 2, '多条命中时，系统序号 应是实际作用的那一行');
+  }
+});
+
+test('操作执行记录：列名叫校对ID，写的是校对单号（不再冒充大表序号）', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processRectifyWorkbook(rectifyParsed([
+    [901, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '17:35', 1.83, '删除'],
+  ]));
+  m.applyBatchOperations(appState.rectifyOperations);
+  captured = [];
+  m.exportOperationLog();
+  assert.deepStrictEqual(captured[0].rows[0], ['轮次', '校对ID', '工号', '姓名', '班组', '操作类型', '操作详情', '备注']);
+  assert.strictEqual(String(captured[0].rows[1][1]), '901');
+});
+
+test('业务键定位仍然优先于任何号码：校对单号撞上别人也不改错人', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  // 校对单号 2 恰好等于大表里张三的序号，但业务键指向王五
+  m.processRectifyWorkbook(rectifyParsed([
+    [2, '10010003', '王五', '底盘一组', '20260802', '15:45', '20260802', '17:35', 1.83, '删除'],
+  ]));
+  const res = m.applyBatchOperations(appState.rectifyOperations);
+  assert.deepStrictEqual(res.issues, []);
+  assert.ok(!appState.mergedRecords.some(r => r['工号'] === '10010003'), '删的是王五');
+  assert.ok(appState.mergedRecords.some(r => r['工号'] === '10010001'), '不能误删张三');
+});
+
 
 // ==================== 导出保护 ====================
 section('导出保护');
