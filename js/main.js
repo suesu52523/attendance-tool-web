@@ -180,6 +180,13 @@ const SYSTEM_OUTPUT_HEADERS = [
   '类型', '开始时间', '结束时间', '定额量', '加班报酬类型', '加班原因'
 ];
 
+// 加班时数上限（业务口径：2026-09-17 由考勤业务方定为 48 小时）
+// 用途：合表导入与整改执行时拦下明显异常的时数（如 49 小时这类跨天算错 / 多打一位的值）
+// 为什么是 48：单条加班最长按“连续两个整天”估；再高基本是填错，宁可退回班组也不往上传
+// 要调这个数字：只改这一处，改完重跑 `node test/main.test.js` 与 `node test/scenarios.test.js`
+// 还没管的：< 0 与 == 0 的口径未定（负数区间已由“结束早于开始”拦下，0 小时等业务确认）
+const MAX_OVERTIME_HOURS = 48;
+
 const SHIFT_MAIN_HEADERS = ['中文名称', '工号', '姓名', '开始日期', '结束日期', '日工作计划'];
 const SHIFT_SHEET2_HEADERS = ['中文名称', '工号', '姓名', '开始日期', '结束日期', '日工作计划', '出勤项目分类', '备注'];
 
@@ -732,6 +739,16 @@ function processGroupWorkbook(parsed) {
         if (!et) rowFailures.push('加班结束时间格式错误');
       }
 
+      // 时数：留空则按时长算出来（要放在失败判定之前 —— 算出来才能一并校验上限）
+      let hours = formatted['加班时数'];
+      if ((hours === '' || hours === undefined || hours === null) && startDate && startTime && endDate && endTime) {
+        hours = computeHoursRaw(raw['加班开始日期'], raw['加班开始时间'], raw['加班结束日期'], raw['加班结束时间']);
+      }
+      // 上限（业务口径 48 小时，见 MAX_OVERTIME_HOURS）：退回班组核对，不进大表
+      if (typeof hours === 'number' && hours > MAX_OVERTIME_HOURS) {
+        rowFailures.push(`加班时数 ${hours} 小时超过 ${MAX_OVERTIME_HOURS} 小时上限`);
+      }
+
       if (rowFailures.length) {
         failures.push({
           sheet: name,
@@ -742,11 +759,6 @@ function processGroupWorkbook(parsed) {
           失败原因: rowFailures.join('；'),
         });
         return;
-      }
-
-      let hours = formatted['加班时数'];
-      if ((hours === '' || hours === undefined || hours === null) && startDate && startTime && endDate && endTime) {
-        hours = computeHoursRaw(raw['加班开始日期'], raw['加班开始时间'], raw['加班结束日期'], raw['加班结束时间']);
       }
 
       merged.push({
@@ -1916,6 +1928,13 @@ function applyBatchOperations(operations) {
     let hours = op['修改后上报加班时数'];
     if ((hours === '' || hours === undefined || hours === null) && startDate && startTime && endDate && endTime) {
       hours = computeHours(startDate, startTime, endDate, endTime);
+    }
+    // 上限（业务口径 48 小时）：不执行这条修改，退回人工核对
+    if (typeof hours === 'number' && hours > MAX_OVERTIME_HOURS) {
+      op['定位状态'] = '时数不合理';
+      issues.push(buildLocateIssue(op, resolved, '时数不合理',
+        `修改后时数 ${hours} 小时超过 ${MAX_OVERTIME_HOURS} 小时上限，修改未执行。请核对是否填错`));
+      return;
     }
     if (startDate) target['加班开始日期'] = startDate;
     if (startTime) target['加班开始时间'] = startTime;

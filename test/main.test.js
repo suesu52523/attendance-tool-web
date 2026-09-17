@@ -135,6 +135,78 @@ test('toYYYYMMDD 整串匹配，不再把 2026/8/10x 截成合法日期', () => 
   assert.ok(!/^\d{8}$/.test(m.toYYYYMMDD('2026/8/10x')), '带尾巴的日期不应被当成合法 8 位日期');
 });
 
+// ==================== 加班时数上限（M1 问题 5） ====================
+// 业务口径（2026-09-17）：单条加班时数上限 48 小时，超过的退回班组核对。
+// 背景：以前没有任何上下界，49 小时这种“跨天算错 / 多打一位”的值能直接进大表并导出。
+section('加班时数上限（M1 问题 5）');
+
+const LIMIT_HEADERS = ['序号', '工号', '姓名', '班组', '加班开始日期', '加班开始时间',
+  '加班结束日期', '加班结束时间', '加班时数', '加班原因', '加班类别', '科负责人核准'];
+function groupWorkbookWithHours(date, startTime, endTime, hours) {
+  return { fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    LIMIT_HEADERS,
+    [1, '10010001', '张三', '一组', date, startTime, date, endTime, hours, '产能爬坡', '工作日', '核准'],
+  ] } };
+}
+
+test('填 49 小时被退回（超过 48 上限）', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '17:00', 49));
+  assert.strictEqual(appState.mergedRecords.length, 0, '超上限的行不能进大表');
+  assert.strictEqual(appState.groupFailures.length, 1);
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('48'), appState.groupFailures[0]['失败原因']);
+});
+
+test('填 48 小时照常通过（边界值）', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '17:00', 48));
+  assert.strictEqual(appState.groupFailures.length, 0, '48 小时是边界内，不能误拦');
+  assert.strictEqual(appState.mergedRecords.length, 1);
+  assert.strictEqual(appState.mergedRecords[0]['加班时数'], 48);
+});
+
+test('时数留空但算出来超 48 小时，同样退回', () => {
+  resetState();
+  // 2026-08-01 08:00 → 2026-08-03 09:00 = 49 小时
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '09:00', ''));
+  appState.mergedRecords = [];
+  resetState();
+  const wb = { fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    LIMIT_HEADERS,
+    [1, '10010001', '张三', '一组', '2026-08-01', '08:00', '2026-08-03', '09:00', '', '产能爬坡', '工作日', '核准'],
+  ] } };
+  m.processGroupWorkbook(wb);
+  assert.strictEqual(appState.mergedRecords.length, 0, '算出来的 49 小时也不能进大表');
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('48'), appState.groupFailures[0]['失败原因']);
+});
+
+test('样本里的正常取值（8 小时）不受影响', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '17:00', 8));
+  assert.strictEqual(appState.groupFailures.length, 0);
+  assert.strictEqual(appState.mergedRecords[0]['加班时数'], 8);
+});
+
+test('整改阶段：修改后时数超上限 → 记一条清单且原记录不变', () => {
+  resetState();
+  appState.mergedRecords = [{
+    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '底盘一组',
+    加班开始日期: '2026-08-01', 加班开始时间: '08:00',
+    加班结束日期: '2026-08-01', 加班结束时间: '17:00', 加班时数: 9,
+  }];
+  const res = m.applyBatchOperations([{
+    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '底盘一组', 操作类型: '修改', roundNo: 1,
+    原开始日期: '20260801', 原开始时间: '08:00',
+    修改后开始日期: '2026-08-01', 修改后开始时间: '08:00',
+    修改后结束日期: '2026-08-01', 修改后结束时间: '17:00',
+    修改后上报加班时数: 49,
+  }]);
+  assert.strictEqual(res.issues.length, 1, '应记一条驳回');
+  assert.strictEqual(res.issues[0]['级别'], '时数不合理');
+  assert.ok(res.issues[0]['说明'].includes('48'), res.issues[0]['说明']);
+  assert.strictEqual(appState.mergedRecords[0]['加班时数'], 9, '原记录不能被改');
+});
+
 // ==================== 合并大表定位 ====================
 section('合并大表定位（业务键）');
 
