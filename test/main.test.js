@@ -16,11 +16,14 @@ const src = fs.readFileSync(MAIN_JS, 'utf8');
 // ---------- 桩 ----------
 let captured = [];
 const xlsxStub = {
-  // 只模拟测试用到的那一种格式：'h:mm' 按真实 XLSX 的行为来（0.5 → "12:00"，小时不补零），
-  // 其余格式返回空串。注意：如果这里永远返回空串，「时数列被当成钟点」的 bug 测不出来（假绿）。
-  SSF: { format: (fmt, v) => (fmt === 'h:mm'
-    ? `${Math.floor(v * 24)}:${String(Math.round(v * 1440) % 60).padStart(2, '0')}`
-    : '') },
+  // 只模拟测试用到的两种格式，行为对齐真实 XLSX：'h:mm'（0.5 → "12:00"，小时不补零）、
+  // 'yyyy-mm-dd'（Excel 日期序列号 → 日期，1899-12-30 为 0 基准）。
+  // 注意：这两种都不实现的话，相关 bug 会测不出来（假绿）。
+  SSF: { format: (fmt, v) => {
+    if (fmt === 'h:mm') return `${Math.floor(v * 24)}:${String(Math.round(v * 1440) % 60).padStart(2, '0')}`;
+    if (fmt === 'yyyy-mm-dd') return new Date(Date.UTC(1899, 11, 30) + Math.round(v) * 86400000).toISOString().slice(0, 10);
+    return '';
+  } },
   utils: {
     book_new: () => ({}),
     aoa_to_sheet: (rows) => ({ rows }),
@@ -327,6 +330,69 @@ test('整改阶段：修改后时间是区间 → 记一条清单且原记录不
   assert.strictEqual(res.issues[0]['级别'], '时间不合理');
   assert.ok(res.issues[0]['说明'].includes('时刻'), res.issues[0]['说明']);
   assert.strictEqual(appState.mergedRecords[0]['加班开始时间'], '15:45', '原记录不能被改');
+});
+// ==================== 结束早于开始（M1 问题 1，业务口径 B：拦下退回） ====================
+// 来源：docs/排查/M1-问题说明.html 的问题 1。
+// 口径：同一天内结束时间早于开始时间 = 填错（夜班常忘了把结束日期改成次日）→ 退回班组核对；
+//       不按“跨天”静默算成 4 小时，也不允许负数进合并大表。
+section('结束早于开始（M1 问题 1）');
+
+const GROUP_ROW_HEADERS = ['序号', '工号', '姓名', '班组', '加班开始日期', '加班开始时间',
+  '加班结束日期', '加班结束时间', '加班时数', '加班原因', '加班类别', '科负责人核准'];
+
+test('夜班同一天 22:00→02:00 被退回，不进合并大表', () => {
+  resetState();
+  m.processGroupWorkbook({ fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    GROUP_ROW_HEADERS,
+    [1, '10010001', '张三', '一组', '2026-08-01', '22:00', '2026-08-01', '02:00', '', '夜班生产', '工作日', '核准'],
+  ] } });
+  assert.strictEqual(appState.mergedRecords.length, 0, '结束早于开始的行不能进合并大表');
+  assert.strictEqual(appState.groupFailures.length, 1);
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('早于开始'), appState.groupFailures[0]['失败原因']);
+});
+
+test('Excel 数值形态的同日夜班同样被退回（真实 xlsx 里日期时间就是数字）', () => {
+  resetState();
+  const D = 46235; // 2026-08-01
+  m.processGroupWorkbook({ fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    GROUP_ROW_HEADERS,
+    [1, '10010001', '张三', '一组', D, 22 / 24, D, 2 / 24, '', '夜班生产', '工作日', '核准'],
+  ] } });
+  assert.strictEqual(appState.mergedRecords.length, 0, '真实数字形态也不能进合并大表');
+  assert.strictEqual(appState.groupFailures.length, 1);
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('早于开始'), appState.groupFailures[0]['失败原因']);
+});
+
+test('正常跨天不受影响：结束日期填次日仍算 4 小时', () => {
+  resetState();
+  m.processGroupWorkbook({ fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    GROUP_ROW_HEADERS,
+    [1, '10010001', '张三', '一组', '2026-08-01', '22:00', '2026-08-02', '02:00', '', '夜班生产', '工作日', '核准'],
+  ] } });
+  assert.strictEqual(appState.groupFailures.length, 0, '正常跨天不能被误拦');
+  assert.strictEqual(appState.mergedRecords.length, 1);
+  assert.strictEqual(appState.mergedRecords[0]['加班时数'], 4);
+});
+
+test('整改阶段：修改后结束早于开始被驳回，不改动原记录', () => {
+  resetState();
+  appState.mergedRecords = [{
+    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '一组',
+    加班开始日期: '2026-08-01', 加班开始时间: '22:00',
+    加班结束日期: '2026-08-02', 加班结束时间: '02:00', 加班时数: 4,
+  }];
+  const res = m.applyBatchOperations([{
+    系统序号: 1, 工号: '10010001', 姓名: '张三', 班组: '一组', 操作类型: '修改', roundNo: 1,
+    原开始日期: '20260801', 原开始时间: '22:00',
+    修改后开始日期: '2026-08-01', 修改后开始时间: '22:00',
+    修改后结束日期: '2026-08-01', 修改后结束时间: '02:00',
+  }]);
+  assert.strictEqual(res.issues.length, 1, '应记一条驳回');
+  assert.strictEqual(res.issues[0]['级别'], '时间不合理');
+  assert.ok(res.issues[0]['说明'].includes('早于开始'), res.issues[0]['说明']);
+  const rec = appState.mergedRecords[0];
+  assert.strictEqual(rec['加班结束日期'], '2026-08-02', '原记录不能被改');
+  assert.strictEqual(rec['加班时数'], 4, '原时数不能被改');
 });
 
 // ==================== 合并大表定位 ====================

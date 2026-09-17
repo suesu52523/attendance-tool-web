@@ -492,8 +492,10 @@ function computeHours(startDate, startTime, endDate, endTime) {
   const end = new Date(edParts.y, edParts.m - 1, edParts.d, etParts.h, etParts.m);
   if (isNaN(start.getTime()) || isNaN(end.getTime())) return '';
 
-  let diff = (end - start) / 3600000;
-  if (diff < 0) diff += 24;
+  const diff = (end - start) / 3600000;
+  // 结束早于开始**不再自动补一天**：业务口径是「填错了」，由调用方拦下退回人工核对
+  // （合表校验 processGroupWorkbook / 整改执行 applyBatchOperations）
+  // ponytail: 这里用本地时间做差；中国无夏令时，夏令时地区会差 1 小时。升级路径 = 换时区感知的日期库
   return parseFloat(diff.toFixed(2));
 }
 
@@ -748,6 +750,12 @@ function processGroupWorkbook(parsed) {
         if (!ed) rowFailures.push('加班结束日期无效（日期不存在或格式不对）');
         if (!st) rowFailures.push('加班开始时间格式错误（只能填一个时刻，如 8:15 或 08:15）');
         if (!et) rowFailures.push('加班结束时间格式错误（只能填一个时刻，如 8:15 或 08:15）');
+        // 结束早于开始 = 填错（夜班常忘了把结束日期改成次日）→ 退回班组核对，不进合并大表
+        // 口径见 docs/排查/M1-问题说明.html 问题 1：不按跨天静默算，也不允许负数进大表
+        const span = computeHours(startDate, startTime, endDate, endTime);
+        if (typeof span === 'number' && span < 0) {
+          rowFailures.push('加班结束时间早于开始时间（请核对结束日期，夜班通常应填次日）');
+        }
       }
 
       if (rowFailures.length) {
@@ -1945,9 +1953,18 @@ function applyBatchOperations(operations) {
         `修改后时间不是一个时刻（开始 ${startTime || '-'}，结束 ${endTime || '-'}），修改未执行。请一格只填一个时刻，如 8:15`));
       return;
     }
+    // 结束早于开始 = 填错 → 不执行这条修改，退回人工核对（与「未定位」同一套处理）
+    const span = (startDate && startTime && endDate && endTime)
+      ? computeHours(startDate, startTime, endDate, endTime) : '';
+    if (typeof span === 'number' && span < 0) {
+      op['定位状态'] = '时间不合理';
+      issues.push(buildLocateIssue(op, resolved, '时间不合理',
+        `修改后结束时间早于开始时间（${endDate} ${endTime} 早于 ${startDate} ${startTime}），修改未执行。请核对结束日期，夜班通常应填次日`));
+      return;
+    }
     let hours = op['修改后上报加班时数'];
-    if ((hours === '' || hours === undefined || hours === null) && startDate && startTime && endDate && endTime) {
-      hours = computeHours(startDate, startTime, endDate, endTime);
+    if ((hours === '' || hours === undefined || hours === null) && span !== '') {
+      hours = span;
     }
     if (startDate) target['加班开始日期'] = startDate;
     if (startTime) target['加班开始时间'] = startTime;
