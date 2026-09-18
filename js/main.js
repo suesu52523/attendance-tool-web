@@ -184,8 +184,19 @@ const SYSTEM_OUTPUT_HEADERS = [
 // 用途：合表导入与整改执行时拦下明显异常的时数（如 49 小时这类跨天算错 / 多打一位的值）
 // 为什么是 48：单条加班最长按“连续两个整天”估；再高基本是填错，宁可退回班组也不往上传
 // 要调这个数字：只改这一处，改完重跑 `node test/main.test.js` 与 `node test/scenarios.test.js`
-// 还没管的：< 0 与 == 0 的口径未定（负数区间已由“结束早于开始”拦下，0 小时等业务确认）
+// 0 与负数现已按「不合理」拦下；若业务上确需「0 小时占位」，只改 overtimeHoursProblem 里的 n <= 0
 const MAX_OVERTIME_HOURS = 48;
+
+// 加班时数校验（合表导入与整改执行共用）：不合理返回原因文本，合理返回空串
+// 允许数字，也允许「文本形式的数字」（Excel 里被存成文本的 "2.5"）；"半小时" 这类文字一律退回
+function overtimeHoursProblem(hours) {
+  if (hours === '' || hours === undefined || hours === null) return '';
+  const n = typeof hours === 'number' ? hours : Number(String(hours).trim());
+  if (!Number.isFinite(n)) return `加班时数「${hours}」不是数字，请填小时数（如 2 或 2.5）`;
+  if (n <= 0) return `加班时数 ${n} 小时不合理（必须大于 0）`;
+  if (n > MAX_OVERTIME_HOURS) return `加班时数 ${n} 小时超过 ${MAX_OVERTIME_HOURS} 小时上限`;
+  return '';
+}
 
 const SHIFT_MAIN_HEADERS = ['中文名称', '工号', '姓名', '开始日期', '结束日期', '日工作计划'];
 const SHIFT_SHEET2_HEADERS = ['中文名称', '工号', '姓名', '开始日期', '结束日期', '日工作计划', '出勤项目分类', '备注'];
@@ -699,6 +710,39 @@ function buildLocateIssue(op, resolved, level, message) {
   };
 }
 
+// 日期换算成「天序号」，用于算两条记录相差几天（null = 日期不可用）
+function dayNumber(dateStr) {
+  const p = parseDateParts(normalizeDate(dateStr));
+  return p ? Date.UTC(p.y, p.m - 1, p.d) / 86400000 : null;
+}
+
+// 匹配失败时的核对线索：同一天大表里有什么 / 最近一次是什么
+// 为什么需要：校对系统记的是「班次起点」、班组表记的是「加班起点」，两边时刻不同就会匹配失败；
+//   把大表里当天的记录（含工时是否一致）直接写进清单，人一眼判断「不用动」还是「要改」
+function buildMatchHint(empNo, startDate, reportedHours) {
+  const mine = appState.mergedRecords.filter(r => String(r['工号']).trim() === empNo);
+  if (!mine.length) return '该工号在大表里没有任何记录（可能本月没有上报）';
+  const span = r => `${r['加班开始时间']}-${r['加班结束时间']}（${r['加班时数']}h）`;
+  const key = toYYYYMMDD(startDate);
+  const sameDay = key ? mine.filter(r => toYYYYMMDD(r['加班开始日期']) === key) : [];
+  if (sameDay.length) {
+    const hasHours = reportedHours !== '' && reportedHours !== undefined && reportedHours !== null;
+    const hit = hasHours && sameDay.some(r => Number(r['加班时数']) === Number(reportedHours));
+    const tail = hasHours ? `；与上报 ${reportedHours}h ${hit ? '一致' : '不一致，请核对'}` : '';
+    return `同一天大表里有：${sameDay.map(span).join('、')}${tail}`;
+  }
+  const t = dayNumber(startDate);
+  let best = null;
+  for (const r of mine) {
+    const n = dayNumber(r['加班开始日期']);
+    if (n === null || t === null) continue;
+    const gap = Math.round(n - t);
+    if (!best || Math.abs(gap) < Math.abs(best.gap)) best = { gap, text: `${r['加班开始日期']} ${span(r)}` };
+  }
+  if (!best) return '当天大表里没有，也找不到可比的记录';
+  return `当天大表里没有；最近一次是 ${best.text}（${best.gap > 0 ? '+' : ''}${best.gap} 天）`;
+}
+
 // ==================== 步骤 1：导入与合并 ====================
 
 function processGroupWorkbook(parsed) {
@@ -714,12 +758,21 @@ function processGroupWorkbook(parsed) {
     totalRecords += rowCount;
 
     const hasRequired = headers.includes('工号') && headers.includes('姓名') && headers.includes('加班开始日期');
-    const status = hasRequired ? 'ok' : 'warning';
+    // 表头比对：缺了认识的列 / 出现不认识的列，都提示出来
+    // （班组把「科负责人核准」改成别的写法时，旧行为是那列静默变空，页面上看不出任何异常）
+    const missingCols = GROUP_HEADERS.filter(h => !headers.includes(h));
+    const unknownCols = headers.filter(h => h && !GROUP_HEADERS.includes(h));
+    const note = [
+      missingCols.length ? `缺少列：${missingCols.join('、')}` : '',
+      unknownCols.length ? `不认识的列：${unknownCols.join('、')}（该列不会被读取）` : '',
+    ].filter(Boolean).join('；');
+    const status = (hasRequired && !note) ? 'ok' : 'warning';
 
     sheets.push({
       name,
       rowCount,
       status,
+      note,
       headers,
       sample: dataRows.slice(0, 3),
     });
@@ -781,10 +834,9 @@ function processGroupWorkbook(parsed) {
       if ((hours === '' || hours === undefined || hours === null) && startDate && startTime && endDate && endTime) {
         hours = computeHoursRaw(raw['加班开始日期'], raw['加班开始时间'], raw['加班结束日期'], raw['加班结束时间']);
       }
-      // 上限（业务口径 48 小时，见 MAX_OVERTIME_HOURS）：退回班组核对，不进大表
-      if (typeof hours === 'number' && hours > MAX_OVERTIME_HOURS) {
-        rowFailures.push(`加班时数 ${hours} 小时超过 ${MAX_OVERTIME_HOURS} 小时上限`);
-      }
+      // 时数合理性（数字 / >0 / ≤48，见 overtimeHoursProblem）：不合理退回班组核对，不进大表
+      const hoursProblem = overtimeHoursProblem(hours);
+      if (hoursProblem) rowFailures.push(hoursProblem);
 
       if (rowFailures.length) {
         failures.push({
@@ -898,6 +950,7 @@ function processAbnormalWorkbook(parsed) {
         failures.push({
           ...rec,
           行号: idx + 2,
+          线索: buildMatchHint(empNo, rec['开始日期'], rec['上报加班时数']),
           失败原因: '无法在合并大表中匹配到对应记录（请核对工号、开始日期/时间）',
         });
       } else {
@@ -1278,7 +1331,7 @@ function renderImport() {
                   <tr>
                     <td class="font-medium">${sheet.name}</td>
                     <td>${sheet.rowCount ?? sheet.rows}</td>
-                    <td><span class="badge ${sheet.status === 'ok' ? 'badge-success' : 'badge-warning'}">${sheet.status === 'ok' ? '正常' : '需核对'}</span></td>
+                    <td><span class="badge ${sheet.status === 'ok' ? 'badge-success' : 'badge-warning'}">${sheet.status === 'ok' ? '正常' : '需核对'}</span>${sheet.note ? `<div class="text-xs text-apple-muted mt-1">${sheet.note}</div>` : ''}</td>
                     <td class="text-apple-muted">${sheet.headers ? sheet.headers.length : '-'}</td>
                   </tr>
                 `).join('')}
@@ -2001,11 +2054,11 @@ function applyBatchOperations(operations) {
     if ((hours === '' || hours === undefined || hours === null) && span !== '') {
       hours = span;
     }
-    // 上限（业务口径 48 小时）：不执行这条修改，退回人工核对
-    if (typeof hours === 'number' && hours > MAX_OVERTIME_HOURS) {
+    // 时数合理性（数字 / >0 / ≤48）：不合理就不执行这条修改，退回人工核对
+    const hoursProblem = overtimeHoursProblem(hours);
+    if (hoursProblem) {
       op['定位状态'] = '时数不合理';
-      issues.push(buildLocateIssue(op, resolved, '时数不合理',
-        `修改后时数 ${hours} 小时超过 ${MAX_OVERTIME_HOURS} 小时上限，修改未执行。请核对是否填错`));
+      issues.push(buildLocateIssue(op, resolved, '时数不合理', `修改后${hoursProblem}，修改未执行。请核对是否填错`));
       return;
     }
     if (startDate) target['加班开始日期'] = startDate;
@@ -2389,7 +2442,7 @@ function exportAbnormalFailures() {
     showToast('暂无匹配失败记录', 'info');
     return;
   }
-  const headers = [...ABNORMAL_HEADERS, '行号', '失败原因'];
+  const headers = [...ABNORMAL_HEADERS, '行号', '线索', '失败原因'];
   const rows = failures.map(f => headers.map(h => f[h] !== undefined ? f[h] : ''));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([headers, ...rows]), '匹配失败记录');

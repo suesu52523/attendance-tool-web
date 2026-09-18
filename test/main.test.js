@@ -1096,6 +1096,106 @@ test('有数据时导出合并大表正常生成 sheet', () => {
   assert.strictEqual(captured[0].rows.length, 5, '表头 + 4 条记录');
 });
 
+// ==================== M3 导入校验补强（2026-09-18） ====================
+section('M3 导入校验补强：时数合理性 / 表头变化提示 / 匹配失败线索');
+
+test('加班时数填成文字「半小时」被退回，不进大表', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '15:45', '17:55', '半小时'));
+  assert.strictEqual(appState.mergedRecords.length, 0, '文字时数不能进大表');
+  assert.strictEqual(appState.groupFailures.length, 1);
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('不是数字'), appState.groupFailures[0]['失败原因']);
+});
+
+test('加班时数 0 或负数被退回', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '10:00', 0));
+  assert.strictEqual(appState.mergedRecords.length, 0, '0 小时无意义');
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('必须大于 0'), appState.groupFailures[0]['失败原因']);
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '08:00', '10:00', -1));
+  assert.strictEqual(appState.mergedRecords.length, 0, '负数不能进大表');
+  assert.ok(appState.groupFailures[0]['失败原因'].includes('必须大于 0'), appState.groupFailures[0]['失败原因']);
+});
+
+test('文本形式的数字「2.5」照常放行（不误伤 Excel 文本单元格）', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '15:45', '18:15', '2.5'));
+  assert.strictEqual(appState.mergedRecords.length, 1);
+  assert.strictEqual(appState.groupFailures.length, 0);
+});
+
+test('整改表「修改后时数」填成文字时不执行，进定位异常清单', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processRectifyWorkbook(rectifyParsed([
+    [1, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '17:35', 1.83, '修改',
+      '20260801', '18:00', '20260801', '21:00', '半小时'],
+  ]));
+  const res = m.applyBatchOperations(appState.rectifyOperations);
+  assert.strictEqual(res.issues.length, 1, '应进定位异常清单');
+  assert.strictEqual(appState.rectifyOperations[0]['定位状态'], '时数不合理');
+  const zhangsan = appState.mergedRecords.find(r => r['工号'] === '10010001');
+  assert.strictEqual(zhangsan['加班时数'], 1.83, '时数不合理时不能动大表');
+});
+
+test('班组表列名被改（缺列 + 多列）会提示，不再静默丢列', () => {
+  resetState();
+  const headers = [...GROUP_ROW_HEADERS.slice(0, 11), '领导审核批准'];
+  m.processGroupWorkbook({ fileName: '班组表.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    headers,
+    [1, '10010001', '张三', '一组', '2026-08-01', '15:45', '2026-08-01', '18:45', 3, '产能爬坡', '工作日', '核准'],
+  ] } });
+  const sheet = appState.groupSheets[0];
+  assert.strictEqual(sheet.status, 'warning', '列名不认识必须提示');
+  assert.ok(sheet.note.includes('科负责人核准'), sheet.note);
+  assert.ok(sheet.note.includes('领导审核批准'), sheet.note);
+  assert.strictEqual(appState.mergedRecords.length, 1, '行本身照常合并');
+});
+
+test('标准表头的 sheet 仍是「正常」（不误报）', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '15:45', '17:55', 2));
+  assert.strictEqual(appState.groupSheets[0].status, 'ok', appState.groupSheets[0].note);
+  assert.strictEqual(appState.groupSheets[0].note, '');
+});
+
+test('匹配失败给出线索：同一天大表里的记录 + 工时不一致', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([
+    [7, '10010001', '张三', '底盘一组', 20260801, '07:00', 20260801, '11:00', 4],
+  ]));
+  const f = appState.abnormalFailures[0];
+  assert.ok(f, '应当有匹配失败记录');
+  assert.ok(f['线索'].includes('同一天大表里有'), f['线索']);
+  assert.ok(f['线索'].includes('不一致'), f['线索']);
+});
+
+test('匹配失败且当天无记录时，线索指向最近一次', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([
+    [8, '10010001', '张三', '底盘一组', 20260805, '15:45', 20260805, '17:35', 1.83],
+  ]));
+  const f = appState.abnormalFailures[0];
+  assert.ok(f['线索'].includes('当天大表里没有'), f['线索']);
+  assert.ok(f['线索'].includes('最近一次'), f['线索']);
+});
+
+test('匹配失败记录导出的表里带「线索」一列且非空', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([
+    [9, '10010001', '张三', '底盘一组', 20260805, '15:45', 20260805, '17:35', 1.83],
+  ]));
+  captured = [];
+  m.exportAbnormalFailures();
+  const headers = captured[0].rows[0];
+  assert.ok(headers.includes('线索'), JSON.stringify(headers));
+  assert.ok(captured[0].rows[1][headers.indexOf('线索')], '线索不能是空的');
+});
+
 // ==================== 汇总 ====================
 console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`);
 if (failures.length) {
