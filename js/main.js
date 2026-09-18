@@ -282,6 +282,33 @@ const SYSTEM_OUTPUT_HEADERS = [
   '类型', '开始时间', '结束时间', '定额量', '加班报酬类型', '加班原因'
 ];
 
+// 加班时数上限（业务口径：2026-09-17 由考勤业务方定为 48 小时）
+// 用途：合表导入与整改执行时拦下明显异常的时数（如 49 小时这类跨天算错 / 多打一位的值）
+// 为什么是 48：单条加班最长按“连续两个整天”估；再高基本是填错，宁可退回班组也不往上传
+// 要调这个数字：只改这一处，改完重跑 `node test/main.test.js` 与 `node test/scenarios.test.js`
+// 0 与负数现已按「不合理」拦下；若业务上确需「0 小时占位」，只改 overtimeHoursProblem 里的 n <= 0
+const MAX_OVERTIME_HOURS = 48;
+
+// 加班时数校验（合表导入与整改执行共用）：不合理返回原因文本，合理返回空串
+// 允许数字，也允许「文本形式的数字」（Excel 里被存成文本的 "2.5"）；"半小时" 这类文字一律退回
+function overtimeHoursProblem(hours) {
+  if (hours === '' || hours === undefined || hours === null) return '';
+  const n = typeof hours === 'number' ? hours : Number(String(hours).trim());
+  if (!Number.isFinite(n)) return `加班时数「${hours}」不是数字，请填小时数（如 2 或 2.5）`;
+  if (n <= 0) return `加班时数 ${n} 小时不合理（必须大于 0）`;
+  if (n > MAX_OVERTIME_HOURS) return `加班时数 ${n} 小时超过 ${MAX_OVERTIME_HOURS} 小时上限`;
+  return '';
+}
+
+// 导出用的定额量：必须是数字（真实上传文件 13265 行该格全是数字）
+// 文本形式的数字（"2.5"）归一成数字；非数字原样保留（这类值 M3 导入校验已拦过）
+function toHourNumber(hours) {
+  if (hours === '' || hours === undefined || hours === null) return 0;
+  if (typeof hours === 'number') return hours;
+  const n = Number(String(hours).trim());
+  return Number.isFinite(n) ? n : hours;
+}
+
 const SHIFT_MAIN_HEADERS = ['中文名称', '工号', '姓名', '开始日期', '结束日期', '日工作计划'];
 const SHIFT_SHEET2_HEADERS = ['中文名称', '工号', '姓名', '开始日期', '结束日期', '日工作计划', '出勤项目分类', '备注'];
 
@@ -318,7 +345,7 @@ const demoAbnormal = [
 
 const demoOperations = [
   { 系统序号: 45, 工号: '10010001', 姓名: '张三', 班组: '底盘一组', 操作类型: '修改', 操作详情: '修改后：20260801 18:00-21:00，3h' },
-  { 系统序号: 46, 工号: '10010002', 姓名: '李四', 班组: '前悬一组', 操作类型: '删除', 操作详情: '组长确认重复填报，执行删除' },
+  { 系统序号: 46, 工号: '10010002', 姓名: '李四', 班组: '前悬一组', 操作类型: '删除', 操作详情: '班组考勤员确认重复填报，执行删除' },
   { 系统序号: 47, 工号: '10010003', 姓名: '王五', 班组: '车门一组', 操作类型: '调班', 操作详情: '调班处理：导出至调班模板' },
   { 系统序号: 48, 工号: '10010004', 姓名: '赵六', 班组: '电装一组', 操作类型: '特殊情况', 操作详情: '已口头报备，不做处理' },
 ];
@@ -412,6 +439,16 @@ function getStepHtml(id) {
 
 // ==================== 通用表格渲染 ====================
 
+// M8-1：把数据拼进 HTML 前一律转义（表格 / 文件名 / 清单说明等）。
+// 真数据里暂时没有 < > &（扫过 17 个输入文件 0 格），但值是人工填的，不能靠运气
+function escapeHtml(value) {
+  return String(value === undefined || value === null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function renderTable(rows, options = {}) {
   const { maxRows = 20, emptyText = '暂无数据' } = options;
   if (!rows || rows.length === 0) {
@@ -443,7 +480,7 @@ function renderTable(rows, options = {}) {
                 if (h === '操作类型') {
                   return `<td>${renderOpBadge(val)}</td>`;
                 }
-                return `<td class="${h === '系统序号' || h === '工号' || h === 'ID' ? 'font-medium' : ''}">${val === undefined || val === null ? '-' : val}</td>`;
+                return `<td class="${h === '系统序号' || h === '工号' || h === 'ID' ? 'font-medium' : ''}">${val === undefined || val === null ? '-' : escapeHtml(val)}</td>`;
               }).join('')}
             </tr>
           `).join('')}
@@ -462,12 +499,12 @@ function renderStatusBadge(status) {
   if (s.includes('修改')) return '<span class="badge badge-info">修改</span>';
   if (s.includes('调班')) return '<span class="badge badge-warning">调班</span>';
   if (s.includes('特殊情况')) return '<span class="badge badge-muted">特殊情况</span>';
-  return `<span class="badge badge-muted">${s}</span>`;
+  return `<span class="badge badge-muted">${escapeHtml(s)}</span>`;
 }
 
 function renderOpBadge(type) {
   const cls = getOpBadgeClass(type);
-  return `<span class="badge ${cls}">${type}</span>`;
+  return `<span class="badge ${cls}">${escapeHtml(type)}</span>`;
 }
 
 // 未导入文件时页面展示的是内置示例数据，明确标注避免误读为已导入的真实数据
@@ -546,6 +583,16 @@ function normalizeDate(str) {
       return `${y}-${m}-${day}`;
     }
   }
+  // 中文日期写法统一成 2026-08-10：2026年8月10日 / 2026 年 8 月 10 号 / 全角数字
+  // 这里只管“把写法统一”，日期到底存不存在由 parseDateParts 的日历校验把关（2 月 30 日不转）
+  const cn = s.normalize('NFKC').match(/^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]$/);
+  if (cn) {
+    const y = +cn[1], mo = +cn[2], d = +cn[3];
+    const rt = new Date(y, mo - 1, d);
+    if (rt.getFullYear() === y && rt.getMonth() === mo - 1 && rt.getDate() === d) {
+      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
   return s;
 }
 
@@ -571,7 +618,11 @@ function toYYYYMMDD(dateVal) {
 
 function parseTimeParts(timeStr) {
   const t = normalizeTime(timeStr);
-  const m = t.match(/(\d{1,2}):(\d{2})/);
+  // 必须整串就是一个时刻：拦下 "15:00~19:00"（一格写两个时间）、"19:00（次日）" 这类
+  // （以前没锁头尾，"15:00~19:00" 会被当成 15:00 用，脏值一路进大表并原样导出）
+  // 口径跟 padTime 一致：h:mm，可带秒
+  // ponytail: 带秒的值会原样进导出；若校对系统不认 h:mm:ss，再在导出前截断到分
+  const m = t.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
   if (!m) return null;
   const h = parseInt(m[1], 10);
   const mi = parseInt(m[2], 10);
@@ -598,19 +649,31 @@ function computeHours(startDate, startTime, endDate, endTime) {
   const end = new Date(edParts.y, edParts.m - 1, edParts.d, etParts.h, etParts.m);
   if (isNaN(start.getTime()) || isNaN(end.getTime())) return '';
 
-  let diff = (end - start) / 3600000;
-  if (diff < 0) diff += 24;
+  const diff = (end - start) / 3600000;
+  // 结束早于开始**不再自动补一天**：业务口径是「填错了」，由调用方拦下退回人工核对
+  // （合表校验 processGroupWorkbook / 整改执行 applyBatchOperations）
+  // ponytail: 这里用本地时间做差；中国无夏令时，夏令时地区会差 1 小时。升级路径 = 换时区感知的日期库
   return parseFloat(diff.toFixed(2));
 }
 
 function parseDateParts(dateStr) {
   const s = String(dateStr).trim();
+  let parts = null;
   if (/^\d{8}$/.test(s)) {
-    return { y: parseInt(s.slice(0, 4), 10), m: parseInt(s.slice(4, 6), 10), d: parseInt(s.slice(6, 8), 10) };
+    parts = { y: parseInt(s.slice(0, 4), 10), m: parseInt(s.slice(4, 6), 10), d: parseInt(s.slice(6, 8), 10) };
+  } else {
+    const m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
+    if (m) {
+      parts = { y: parseInt(m[1], 10), m: parseInt(m[2], 10), d: parseInt(m[3], 10) };
+    }
   }
-  const m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
-  if (m) {
-    return { y: parseInt(m[1], 10), m: parseInt(m[2], 10), d: parseInt(m[3], 10) };
+  if (parts) {
+    // 格式对不代表日期存在：用 Date 往返比对拦下 2 月 30 日 / 13 月 / 4 月 31 日
+    // （不拦的话 new Date(2026,1,30) 会锚静挪到 2026-03-02，进 2007 表就成了 20260230）
+    // ponytail: 往返校验靠本地时间；中国无夏令时，夏令时地区会差 1 小时。升级路径 = Temporal.PlainDate
+    const rt = new Date(parts.y, parts.m - 1, parts.d);
+    const exists = rt.getFullYear() === parts.y && rt.getMonth() === parts.m - 1 && rt.getDate() === parts.d;
+    return exists ? parts : null;
   }
   const d = new Date(s);
   if (!isNaN(d.getTime())) {
@@ -662,9 +725,19 @@ function formatCellValue(value, header) {
     const formatted = excelDateToString(value);
     if (formatted) return formatted;
   }
-  if (h.includes('时间') && typeof value === 'number') {
+  // 「时数」列存的是小时数（0.5 = 半小时），不是钟点 —— 不能按 h:mm 格式化。
+  // 典型陷阱：「实际加班时数(未减吃饭时间)」，列名里的“时间”来自“未减吃饭时间”。
+  // ponytail: 此处靠列名约定判断；一旦出现名字里不含「时数」的小时列就会退化。
+  //            升级路径 = 读单元格自带的数字格式（SheetJS cellNF + SSF.is_date），不再猜列名。
+  if (h.includes('时间') && !h.includes('时数') && typeof value === 'number') {
     const formatted = excelTimeToString(value);
     if (formatted) return formatted;
+  }
+  // 日期列里的中文写法也统一（三张导入表都过这个函数，转一次，下游的校验、匹配、导出就全对齐了）
+  // 只对含“年月日/号”的文本下手，其他写法原样不动（不扩大改动面）
+  if (h.includes('日期') && typeof value === 'string' && /[年月日号]/.test(value)) {
+    const normalized = normalizeDate(value);
+    if (normalized !== value) return normalized;
   }
   return value;
 }
@@ -716,18 +789,16 @@ function locateMergedRecords(empNo, startDate, startTime, records) {
   return candidates;
 }
 
-// 为一条整改操作定位合并大表中的目标记录
-// 定位优先级：① 业务键（工号 + 原开始日期 + 原开始时间） ② 回退：ID 等于系统序号
+// 为一条整改操作定位合并大表中的目标记录（定位异常清单里，“校对ID”是校对系统的单号，“系统序号”是大表行号，两者不是一回事）
+// 只用业务键（工号 + 原开始日期 + 原开始时间）：定位不到就返回未定位，由调用方写进《定位异常清单》让人核对
+// 为什么不回退到「序号」：大表的系统序号每次导入都从 1 重发、删除后还会重排
+//   （见 processGroupWorkbook 的 systemNo、applyBatchOperations 删除分支的重排序号）
+//   —— 它只是当次会话的排号，不是身份，旧文件里的号码会指到别人身上（历史上“删错人”就是这么来的）
+// ponytail: 若将来确实需要回填旧清单，用稳定的业务键（工号 + 日期）而不是序号
 // 返回 { target, method, hits, candidates }，target 为 null 表示未定位到
 function resolveOperationTarget(op) {
   const byKey = locateMergedRecords(op['工号'], op['原开始日期'], op['原开始时间']);
   if (byKey.length) return { target: byKey[0], method: '业务键', hits: byKey.length, candidates: byKey };
-
-  const id = String(op['系统序号'] === undefined || op['系统序号'] === null ? '' : op['系统序号']).trim();
-  if (id) {
-    const byId = appState.mergedRecords.filter(r => String(r['系统序号']) === id);
-    if (byId.length) return { target: byId[0], method: 'ID回退', hits: byId.length, candidates: byId };
-  }
 
   return { target: null, method: '未定位', hits: 0, candidates: [] };
 }
@@ -754,8 +825,9 @@ function buildLocateIssue(op, resolved, level, message) {
   const candidates = (resolved && resolved.candidates) || [];
   return {
     级别: level,
-    系统序号: op['系统序号'],
-    校对ID: op['系统序号'] || '',
+    // 标明是「执行前」的编号：删除会把全表序号重排成 1..N，删完之后这个号可能指向别人
+    '系统序号（执行前）': (resolved && resolved.target) ? resolved.target['系统序号'] : '',
+    校对ID: op['校对ID'] || '',
     工号: op['工号'],
     姓名: op['姓名'],
     班组: op['班组'],
@@ -766,6 +838,59 @@ function buildLocateIssue(op, resolved, level, message) {
     候选序号: describeCandidates(candidates),
     说明: message,
   };
+}
+
+// 日期换算成「天序号」，用于算两条记录相差几天（null = 日期不可用）
+function dayNumber(dateStr) {
+  const p = parseDateParts(normalizeDate(dateStr));
+  return p ? Date.UTC(p.y, p.m - 1, p.d) / 86400000 : null;
+}
+
+// 匹配失败时的核对线索：同一天大表里有什么 / 最近一次是什么
+// 为什么需要：校对系统记的是「班次起点」、班组表记的是「加班起点」，两边时刻不同就会匹配失败；
+//   把大表里当天的记录（含工时是否一致）直接写进清单，人一眼判断「不用动」还是「要改」
+function buildMatchHint(empNo, startDate, reportedHours) {
+  const mine = appState.mergedRecords.filter(r => String(r['工号']).trim() === empNo);
+  if (!mine.length) return '该工号在大表里没有任何记录（可能本月没有上报）';
+  const span = r => `${r['加班开始时间']}-${r['加班结束时间']}（${r['加班时数']}h）`;
+  const key = toYYYYMMDD(startDate);
+  const sameDay = key ? mine.filter(r => toYYYYMMDD(r['加班开始日期']) === key) : [];
+  if (sameDay.length) {
+    const hasHours = reportedHours !== '' && reportedHours !== undefined && reportedHours !== null;
+    const hit = hasHours && sameDay.some(r => Number(r['加班时数']) === Number(reportedHours));
+    const tail = hasHours ? `；与上报 ${reportedHours}h ${hit ? '一致' : '不一致，请核对'}` : '';
+    return `同一天大表里有：${sameDay.map(span).join('、')}${tail}`;
+  }
+  const t = dayNumber(startDate);
+  let best = null;
+  for (const r of mine) {
+    const n = dayNumber(r['加班开始日期']);
+    if (n === null || t === null) continue;
+    const gap = Math.round(n - t);
+    if (!best || Math.abs(gap) < Math.abs(best.gap)) best = { gap, text: `${r['加班开始日期']} ${span(r)}` };
+  }
+  if (!best) return '当天大表里没有，也找不到可比的记录';
+  return `当天大表里没有；最近一次是 ${best.text}（${best.gap > 0 ? '+' : ''}${best.gap} 天）`;
+}
+
+// 边界检查（只提示，不改执行）：同一笔加班（工号 + 原开始日期 + 原开始时间）在整改表里被写了多种处置
+// 背景：校对系统可能对同一笔加班连报两条异常（提醒「多条记录」），班组若分别填了「改」和「删」就会出现
+// 执行顺序仍是先修改后删除；删不掉的那条进《定位异常清单》。这里只是提前把这种输入摆到人眼前
+function findDispositionConflicts(operations) {
+  const byKey = new Map();
+  (operations || []).forEach(op => {
+    const k = [op['工号'], op['原开始日期'], op['原开始时间']].join('|');
+    if (!byKey.has(k)) byKey.set(k, []);
+    byKey.get(k).push(op);
+  });
+  return [...byKey.values()]
+    .filter(list => list.length > 1 && new Set(list.map(o => o['操作类型'])).size > 1)
+    .map(list => ({
+      工号: list[0]['工号'],
+      姓名: list[0]['姓名'],
+      加班日期: `${list[0]['原开始日期']} ${list[0]['原开始时间']}`,
+      处置: list.map(o => o['操作类型']).join(' + '),
+    }));
 }
 
 // ==================== 步骤 1：导入与合并 ====================
@@ -783,12 +908,21 @@ function processGroupWorkbook(parsed) {
     totalRecords += rowCount;
 
     const hasRequired = headers.includes('工号') && headers.includes('姓名') && headers.includes('加班开始日期');
-    const status = hasRequired ? 'ok' : 'warning';
+    // 表头比对：缺了认识的列 / 出现不认识的列，都提示出来
+    // （班组把「科负责人核准」改成别的写法时，旧行为是那列静默变空，页面上看不出任何异常）
+    const missingCols = GROUP_HEADERS.filter(h => !headers.includes(h));
+    const unknownCols = headers.filter(h => h && !GROUP_HEADERS.includes(h));
+    const note = [
+      missingCols.length ? `缺少列：${missingCols.join('、')}` : '',
+      unknownCols.length ? `不认识的列：${unknownCols.join('、')}（该列不会被读取）` : '',
+    ].filter(Boolean).join('；');
+    const status = (hasRequired && !note) ? 'ok' : 'warning';
 
     sheets.push({
       name,
       rowCount,
       status,
+      note,
       headers,
       sample: dataRows.slice(0, 3),
     });
@@ -811,10 +945,7 @@ function processGroupWorkbook(parsed) {
       const rowNum = idx + 2; // Excel 行号
 
       // 整行空白：Excel 里常见的空行，直接跳过（既不进合并表，也不计入校验失败）
-      const isBlankRow = Object.values(formatted).every(
-        v => String(v === undefined || v === null ? '' : v).trim() === ''
-      );
-      if (isBlankRow) return;
+      if (isBlankRow(formatted)) return;
 
       const startDate = formatted['加班开始日期'];
       const startTime = normalizeTime(formatted['加班开始时间']);
@@ -836,11 +967,26 @@ function processGroupWorkbook(parsed) {
         const ed = parseDateParts(endDate);
         const st = parseTimeParts(startTime);
         const et = parseTimeParts(endTime);
-        if (!sd) rowFailures.push('加班开始日期格式错误');
-        if (!ed) rowFailures.push('加班结束日期格式错误');
-        if (!st) rowFailures.push('加班开始时间格式错误');
-        if (!et) rowFailures.push('加班结束时间格式错误');
+        if (!sd) rowFailures.push('加班开始日期无效（日期不存在或格式不对）');
+        if (!ed) rowFailures.push('加班结束日期无效（日期不存在或格式不对）');
+        if (!st) rowFailures.push('加班开始时间格式错误（只能填一个时刻，如 8:15 或 08:15）');
+        if (!et) rowFailures.push('加班结束时间格式错误（只能填一个时刻，如 8:15 或 08:15）');
+        // 结束早于开始 = 填错（夜班常忘了把结束日期改成次日）→ 退回班组核对，不进合并大表
+        // 口径见 docs/排查/M1-问题说明.html 问题 1：不按跨天静默算，也不允许负数进大表
+        const span = computeHours(startDate, startTime, endDate, endTime);
+        if (typeof span === 'number' && span < 0) {
+          rowFailures.push('加班结束时间早于开始时间（请核对结束日期，夜班通常应填次日）');
+        }
       }
+
+      // 时数：留空则按时长算出来（要放在失败判定之前 —— 算出来才能一并校验上限）
+      let hours = formatted['加班时数'];
+      if ((hours === '' || hours === undefined || hours === null) && startDate && startTime && endDate && endTime) {
+        hours = computeHoursRaw(raw['加班开始日期'], raw['加班开始时间'], raw['加班结束日期'], raw['加班结束时间']);
+      }
+      // 时数合理性（数字 / >0 / ≤48，见 overtimeHoursProblem）：不合理退回班组核对，不进大表
+      const hoursProblem = overtimeHoursProblem(hours);
+      if (hoursProblem) rowFailures.push(hoursProblem);
 
       if (rowFailures.length) {
         failures.push({
@@ -852,11 +998,6 @@ function processGroupWorkbook(parsed) {
           失败原因: rowFailures.join('；'),
         });
         return;
-      }
-
-      let hours = formatted['加班时数'];
-      if ((hours === '' || hours === undefined || hours === null) && startDate && startTime && endDate && endTime) {
-        hours = computeHoursRaw(raw['加班开始日期'], raw['加班开始时间'], raw['加班结束日期'], raw['加班结束时间']);
       }
 
       merged.push({
@@ -908,6 +1049,14 @@ function processGroupWorkbook(parsed) {
 
 // ==================== 步骤 2：异常处理 ====================
 
+// 整行空白：Excel 的 used range 常带尾部空行（导出商、空格、格式残留都会造成）
+// 三条导入路径（班组表 / 异常表 / 整改表）统一用这一条：整行都没内容就当它不存在
+// 不跳过的后果：异常表里变成一条“未匹配”，整改表里变成一条“未填写”
+//   —— 而 confirmBatch 遇到“未填写”会整轮阻断，提示人去找一条根本不存在的记录
+function isBlankRow(rec) {
+  return Object.values(rec).every(v => String(v === undefined || v === null ? '' : v).trim() === '');
+}
+
 function processAbnormalWorkbook(parsed) {
   // 若当前轮次已确认，自动进入下一轮处理新的异常表
   const current = getCurrentRound();
@@ -929,6 +1078,7 @@ function processAbnormalWorkbook(parsed) {
       Object.keys(obj).forEach(h => {
         rec[h] = formatCellValue(obj[h], h);
       });
+      if (isBlankRow(rec)) return; // 尾部空行：不算记录，也不进“未匹配”清单
       ABNORMAL_HEADERS.forEach(h => {
         if (!(h in rec)) rec[h] = '';
       });
@@ -950,15 +1100,15 @@ function processAbnormalWorkbook(parsed) {
         failures.push({
           ...rec,
           行号: idx + 2,
+          线索: buildMatchHint(empNo, rec['开始日期'], rec['上报加班时数']),
           失败原因: '无法在合并大表中匹配到对应记录（请核对工号、开始日期/时间）',
         });
       } else {
-        rec['系统序号'] = hits[0]['系统序号'];
         if (hits.length > 1) {
           warnings.push({
             ...rec,
             行号: idx + 2,
-            定位提醒: `合并大表中存在 ${hits.length} 条同工号同日期记录：${describeCandidates(hits)}，已暂按序号 ${hits[0]['系统序号']} 处理${buildDeptHint(hits, rec['科室'])}。若是同一条加班被重复填报到多个班组（一个人只应属于一个班组），请先清理合并大表；若确实是同一天两次加班，请在异常表补填「开始时间」以便唯一定位`,
+            定位提醒: `合并大表中存在 ${hits.length} 条同工号同日期记录：${describeCandidates(hits)}，尚未处理${buildDeptHint(hits, rec['科室'])}。若是同一条加班被重复填报到多个班组（一个人只应属于一个班组），请先清理合并大表；若确实是同一天两次加班，请在异常表补填「开始时间」以便唯一定位`,
           });
         }
         if (empName && String(hits[0]['姓名'] || '').trim() !== empName) {
@@ -999,6 +1149,7 @@ function processRectifyWorkbook(parsed) {
       return rec;
     });
     objs.forEach(obj => {
+      if (isBlankRow(obj)) return; // 尾部空行：不算操作（否则会被当成“未填写”，整轮被假阻断）
       const type = String(obj['处置方式'] || '').trim();
       let detail = '';
       let opType = type;
@@ -1023,7 +1174,8 @@ function processRectifyWorkbook(parsed) {
       }
 
       operations.push({
-        系统序号: obj['ID'] || '',
+        // obj['ID'] 是校对系统给的单号（导出整改表时原样带出去、原样带回来），不是大表行号
+        校对ID: obj['ID'] || '',
         工号: String(obj['工号'] || '').trim(),
         姓名: obj['姓名'] || '',
         班组: name,
@@ -1131,7 +1283,7 @@ function renderOverview() {
               <div class="w-8 h-8 rounded-lg bg-apple-green/10 text-apple-green flex items-center justify-center shrink-0"><i class="ph ph-number-circle-three text-lg"></i></div>
               <div>
                 <div class="font-medium text-apple-text">整改与输出</div>
-                <div>支持中间处理输出与最终生成，调班数据按轮次累计</div>
+                <div>支持中间处理输出与最终生成；调班数据在同一会话内按轮次累计（点「重新开始」会清空本次数据）</div>
               </div>
             </div>
           </div>
@@ -1229,7 +1381,7 @@ function renderImport() {
               这类重复会让后续「异常处理 / 整改」按工号+日期+时间定位时出现「多条命中」而需要人工核对，建议先在班组填报表里核对并清理。
             </div>
             <div class="mt-2 space-y-1">
-              ${duplicates.slice(0, 3).map(d => `<div class="text-xs text-apple-muted">· ${d['工号']} ${d['姓名']} ${d['加班开始日期']} ${d['加班开始时间']}：共 ${d['条数']} 条（班组：${d['班组']}）</div>`).join('')}
+              ${duplicates.slice(0, 3).map(d => `<div class="text-xs text-apple-muted">· ${escapeHtml(d['工号'])} ${escapeHtml(d['姓名'])} ${escapeHtml(d['加班开始日期'])} ${escapeHtml(d['加班开始时间'])}：共 ${escapeHtml(d['条数'])} 条（班组：${escapeHtml(d['班组'])}）</div>`).join('')}
               ${duplicates.length > 3 ? `<div class="text-xs text-apple-muted">· 共 ${duplicates.length} 组，其余见下载清单</div>` : ''}
             </div>
           </div>
@@ -1250,7 +1402,7 @@ function renderImport() {
               </div>
               <div class="text-sm font-medium mb-1">拖拽文件到此处</div>
               <div class="text-xs text-apple-muted">或点击选择文件</div>
-              ${hasFile ? `<div class="mt-3 text-xs text-apple-green font-medium">已加载：${appState.fileName}</div>` : ''}
+              ${hasFile ? `<div class="mt-3 text-xs text-apple-green font-medium">已加载：${escapeHtml(appState.fileName)}</div>` : ''}
             </div>
           </div>
 
@@ -1356,7 +1508,7 @@ function renderImport() {
                   <tr>
                     <td class="font-medium">${sheet.name}</td>
                     <td>${sheet.rowCount ?? sheet.rows}</td>
-                    <td><span class="badge ${sheet.status === 'ok' ? 'badge-success' : 'badge-warning'}">${sheet.status === 'ok' ? '正常' : '需核对'}</span></td>
+                    <td><span class="badge ${sheet.status === 'ok' ? 'badge-success' : 'badge-warning'}">${sheet.status === 'ok' ? '正常' : '需核对'}</span>${sheet.note ? `<div class="text-xs text-apple-muted mt-1">${sheet.note}</div>` : ''}</td>
                     <td class="text-apple-muted">${sheet.headers ? sheet.headers.length : '-'}</td>
                   </tr>
                 `).join('')}
@@ -1405,7 +1557,7 @@ function renderAbnormal() {
           <i class="ph ph-info mt-0.5 text-lg"></i>
           <div>
             <div class="font-medium">有 ${warnings.length} 条记录需要人工核对</div>
-            <div class="text-apple-muted mt-1">存在同一工号同一天多条加班（已暂按第一条定位），或异常表姓名与合并大表不一致。请在下方「异常记录清单」核对「系统序号 / 匹配状态」两列，必要时下载清单交由组长确认。</div>
+            <div class="text-apple-muted mt-1">存在同一工号同一天多条加班（需要确认是哪一条），或异常表姓名与合并大表不一致。请在下方「异常记录清单」核对「匹配状态」列，必要时下载定位提醒交由班组考勤员确认。</div>
           </div>
         </div>
         <button onclick="exportAbnormalWarnings()" class="h-9 px-4 rounded-full bg-apple-orange/10 text-apple-orange text-xs font-medium hover:bg-apple-orange/20 transition-colors shrink-0">下载定位提醒</button>
@@ -1427,7 +1579,7 @@ function renderAbnormal() {
               </div>
               <div class="text-sm font-medium mb-1">拖拽异常表到此处</div>
               <div class="text-xs text-apple-muted">或点击选择文件</div>
-              ${hasFile ? `<div class="mt-3 text-xs text-apple-green font-medium">已加载：${appState.abnormalWorkbook.fileName}</div>` : ''}
+              ${hasFile ? `<div class="mt-3 text-xs text-apple-green font-medium">已加载：${escapeHtml(appState.abnormalWorkbook.fileName)}</div>` : ''}
             </div>
           </div>
 
@@ -1529,7 +1681,7 @@ function renderAbnormal() {
             </div>
             <div class="p-4 rounded-2xl bg-apple-gray/50">
               <div class="text-sm text-apple-muted mb-1">下发方式</div>
-              <div class="font-medium">整份文件由组长自行查找</div>
+              <div class="font-medium">整份文件由班组考勤员自行查找</div>
             </div>
           </div>
         </div>
@@ -1544,6 +1696,7 @@ function renderRectify() {
   const hasFile = !!appState.rectifyWorkbook;
   const isDemo = !hasFile;
   const locateIssues = round.locateIssues || [];
+  const conflicts = findDispositionConflicts(operations);
   const stats = { 修改: 0, 删除: 0, 调班: 0, 特殊情况: 0, 未填写: 0 };
   operations.forEach(op => {
     const t = op['操作类型'];
@@ -1562,7 +1715,7 @@ function renderRectify() {
             <h3 class="text-xl font-semibold tracking-tight">导入整改表</h3>
             <span class="badge badge-info">第 ${round.roundNo} 轮</span>
           </div>
-          <p class="text-sm text-apple-muted mb-6">组长填写后发回的整改文件</p>
+          <p class="text-sm text-apple-muted mb-6">班组考勤员填写后发回的整改文件</p>
           <div class="drop-zone border-2 border-dashed border-apple-border rounded-3xl p-8 text-center cursor-pointer bg-apple-gray/30 hover:bg-apple-gray/50" id="dropZoneRectify" data-type="rectify">
             <input type="file" class="hidden file-input" accept=".xlsx,.xls" />
             <div class="zone-content">
@@ -1571,7 +1724,7 @@ function renderRectify() {
               </div>
               <div class="text-sm font-medium mb-1">拖拽整改表到此处</div>
               <div class="text-xs text-apple-muted">或点击选择文件</div>
-              ${hasFile ? `<div class="mt-3 text-xs text-apple-green font-medium">已加载：${appState.rectifyWorkbook.fileName}</div>` : ''}
+              ${hasFile ? `<div class="mt-3 text-xs text-apple-green font-medium">已加载：${escapeHtml(appState.rectifyWorkbook.fileName)}</div>` : ''}
             </div>
           </div>
 
@@ -1612,7 +1765,7 @@ function renderRectify() {
           <div class="mt-5 p-4 rounded-2xl bg-apple-green/5 border border-apple-green/10">
             <div class="flex items-start gap-2 text-sm text-apple-green">
               <i class="ph ph-check-circle mt-0.5"></i>
-              <span>无需同步导入合并大表，系统会自动按 ID 定位。</span>
+              <span>无需同步导入合并大表，系统按「工号 + 原开始日期 + 原开始时间」定位。</span>
             </div>
           </div>
 
@@ -1621,6 +1774,21 @@ function renderRectify() {
               <div class="flex items-start gap-2 text-sm text-apple-red">
                 <i class="ph ph-warning-circle mt-0.5"></i>
                 <span>有 ${stats['未填写']} 条记录未填写处置方式，请在整改表中补充填写后重新导入，否则无法执行批量操作。</span>
+              </div>
+            </div>
+          ` : ''}
+
+          ${conflicts.length ? `
+            <div class="mt-4 p-4 rounded-2xl bg-apple-orange/5 border border-apple-orange/20">
+              <div class="flex items-start gap-2 text-sm text-apple-orange">
+                <i class="ph ph-warning mt-0.5"></i>
+                <div>
+                  <div>有 ${conflicts.length} 笔加班写了<b>两种以上处置</b>：执行时仍按「先修改、再删除」的顺序走，删不掉的那条会进入定位异常清单，请先确认是不是同一笔被重复填报。</div>
+                  <div class="text-xs text-apple-muted mt-1">
+                    ${conflicts.slice(0, 3).map(c => `· ${c['工号']} ${c['姓名']} ${c['加班日期']}：${c['处置']}`).join('<br>')}
+                    ${conflicts.length > 3 ? `<br>· 共 ${conflicts.length} 笔，其余略` : ''}
+                  </div>
+                </div>
               </div>
             </div>
           ` : ''}
@@ -1640,8 +1808,8 @@ function renderRectify() {
                   <div class="text-sm text-apple-red">有 ${locateIssues.length} 条操作未执行或未能唯一确定目标行（含无法识别的处置方式），请人工核对后再使用导出文件：</div>
                   ${locateIssues.slice(0, 5).map(i => `
                     <div class="p-3 rounded-2xl bg-apple-red/5 border border-apple-red/10 text-xs">
-                      <div class="font-medium text-apple-red">${i['级别']} · ${i['操作类型']} · 工号 ${i['工号']} ${i['姓名']}</div>
-                      <div class="text-apple-muted mt-1">${i['说明']}</div>
+                      <div class="font-medium text-apple-red">${escapeHtml(i['级别'])} · ${escapeHtml(i['操作类型'])} · 工号 ${escapeHtml(i['工号'])} ${escapeHtml(i['姓名'])}</div>
+                      <div class="text-apple-muted mt-1">${escapeHtml(i['说明'])}</div>
                     </div>
                   `).join('')}
                   ${locateIssues.length > 5 ? `<div class="text-xs text-apple-muted">共 ${locateIssues.length} 条，仅显示前 5 条</div>` : ''}
@@ -1880,7 +2048,7 @@ function renderOutput() {
             </div>
           </div>
           <button onclick="startNewRound()" class="w-full mt-6 h-11 rounded-full bg-apple-gray text-sm font-medium hover:bg-gray-200 transition-colors">
-            开始新一轮处理
+            重新开始（清空本次数据）
           </button>
         </div>
       </div>
@@ -1938,8 +2106,8 @@ function renderOutput() {
           <div class="space-y-2">
             ${locateIssues.slice(0, 5).map(i => `
               <div class="p-3 rounded-2xl bg-apple-red/5 text-xs">
-                <div class="font-medium text-apple-red">${i['级别']} · ${i['操作类型']} · 工号 ${i['工号']} ${i['姓名']}（校对ID ${i['校对ID'] || '-'}）</div>
-                <div class="text-apple-muted mt-1">${i['说明']}</div>
+                <div class="font-medium text-apple-red">${escapeHtml(i['级别'])} · ${escapeHtml(i['操作类型'])} · 工号 ${escapeHtml(i['工号'])} ${escapeHtml(i['姓名'])}（校对ID ${escapeHtml(i['校对ID'] || '-')}）</div>
+                <div class="text-apple-muted mt-1">${escapeHtml(i['说明'])}</div>
               </div>
             `).join('')}
             ${locateIssues.length > 5 ? `<div class="text-xs text-apple-muted">共 ${locateIssues.length} 条，仅显示前 5 条</div>` : ''}
@@ -2017,15 +2185,24 @@ function getOpBadgeClass(type) {
 function confirmBatch() {
   const round = getCurrentRound();
   // 本轮已执行过：必须禁止重复执行
-  // 合并大表在删除后会重新编排序号，重复执行同一份整改表会按旧 ID 改到/删掉别人的记录
+  // 同一批操作做第二遍会写在已经被改过的数据上（删除会重排大表序号、修改会改掉原业务键），结果正确性无法保证
+  // —— 宁可拦住，让人确认后再开新一轮
   if (round.status === 'confirmed' || appState.batchConfirmed) {
-    showToast('本轮批量操作已执行过，不能重复执行。如需重做，请先点「开始新一轮处理」并重新导入整改表', 'error');
+    // 提示语要与 startNewRound 的真实行为一致：它是整场重置（大表、异常表、整改表、轮次历史都会清空）
+    showToast('本轮批量操作已执行过，不能重复执行。如需重做，请先点「重新开始（清空本次数据）」，再按 班组表 → 异常表 → 整改表 重新导入', 'error');
+    return;
+  }
+
+  // 本轮还没导入异常表：《整改表》是从异常表那一步导出来的，跳过它执行 = 拿一份来源不明的表改大表
+  // 真实风险：拿错 / 拿上个月的整改表直接套到本月大表上（改删都不可逆，且无提示）
+  if (!round.abnormalRecords.length) {
+    showToast('本轮还没导入异常表，不能执行。请先完成第 2 步：导入异常表并生成整改表', 'error');
     return;
   }
 
   // 没有导入整改表时不允许执行（避免把页面上的示例操作当成真实操作执行）
   if (!appState.rectifyOperations.length) {
-    showToast('尚未导入整改表，请先导入组长填好并发回的文件', 'error');
+    showToast('尚未导入整改表，请先导入班组考勤员填好并发回的文件', 'error');
     return;
   }
 
@@ -2043,6 +2220,20 @@ function confirmBatch() {
   if (unfilled > 0) {
     showToast(`有 ${unfilled} 条记录未填写处置方式，请补充填写后重新导入整改表`, 'error');
     return;
+  }
+
+  // M4-4：真要动删除/调班之前，给一次后悔机会（原生确认框；点「取消」什么都不做）
+  // 只有修改时不打扰（修改可再改回来，删除不可逆）
+  const removeCount = ops.filter(o => o['操作类型'] === '删除' || o['操作类型'] === '调班').length;
+  if (removeCount > 0 && typeof window !== 'undefined' && typeof window.confirm === 'function') {
+    const modifyCount = ops.filter(o => o['操作类型'] === '修改').length;
+    const ok = window.confirm(
+      `本轮将执行：修改 ${modifyCount} 行，删除 / 调班 ${removeCount} 行。\n删除不可撤销（删了要重新导入班组表重建），确定执行？`
+    );
+    if (!ok) {
+      showToast('已取消执行，数据未改动。可再核对一遍整改表后重新点执行', 'info');
+      return;
+    }
   }
 
   // 执行实际的批量操作：修改/删除/调班
@@ -2069,7 +2260,7 @@ function confirmBatch() {
 }
 
 // 将整改操作应用到合并大表
-// 定位优先级：① 业务键（工号 + 原开始日期 + 原开始时间） ② 回退：ID 等于系统序号
+// 定位只用业务键（工号 + 原开始日期 + 原开始时间），见 resolveOperationTarget：序号不是身份，定位不到就进清单
 // 返回 { applied, issues }；未定位/多条命中的操作会记录到 issues，不再静默跳过
 function applyBatchOperations(operations) {
   const issues = [];
@@ -2095,21 +2286,52 @@ function applyBatchOperations(operations) {
       return;
     }
     if (resolved.hits > 1) {
+      // 同工号同日期多条 = 挑不准是哪一条：宁可不改（改错行会算错当天工时），退回让人补「原开始时间」
       op['定位状态'] = `多条命中(${resolved.hits})`;
       issues.push(buildLocateIssue(op, resolved, '多条命中',
-        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，修改仅作用于序号 ${resolved.target['系统序号']}，请人工确认${buildDeptHint(resolved.candidates, op['班组'])}`));
-    } else {
-      op['定位状态'] = `已定位(${resolved.method})`;
+        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，修改未执行。请补填「原开始时间」以唯一定位后重新导入${buildDeptHint(resolved.candidates, op['班组'])}`));
+      return;
     }
+    op['定位状态'] = `已定位(${resolved.method})`;
 
     const target = resolved.target;
     const startDate = normalizeDate(op['修改后开始日期']);
     const startTime = normalizeTime(op['修改后开始时间']);
     const endDate = normalizeDate(op['修改后结束日期']);
     const endTime = normalizeTime(op['修改后结束时间']);
+    // 日期必须是日历上真存在的那天（2 月 30 日这类会被 JS 悄悄挪走）→ 不执行，退回人工核对
+    if ((startDate && !parseDateParts(startDate)) || (endDate && !parseDateParts(endDate))) {
+      op['定位状态'] = '日期不合理';
+      issues.push(buildLocateIssue(op, resolved, '日期不合理',
+        `修改后日期不存在（开始 ${startDate || '-'}，结束 ${endDate || '-'}），修改未执行。请核对日期`));
+      return;
+    }
+    // 时间必须是单个时刻（一格写两个时间/带备注都不认）→ 不执行，退回人工核对
+    if ((startTime && !parseTimeParts(startTime)) || (endTime && !parseTimeParts(endTime))) {
+      op['定位状态'] = '时间不合理';
+      issues.push(buildLocateIssue(op, resolved, '时间不合理',
+        `修改后时间不是一个时刻（开始 ${startTime || '-'}，结束 ${endTime || '-'}），修改未执行。请一格只填一个时刻，如 8:15`));
+      return;
+    }
+    // 结束早于开始 = 填错 → 不执行这条修改，退回人工核对（与「未定位」同一套处理）
+    const span = (startDate && startTime && endDate && endTime)
+      ? computeHours(startDate, startTime, endDate, endTime) : '';
+    if (typeof span === 'number' && span < 0) {
+      op['定位状态'] = '时间不合理';
+      issues.push(buildLocateIssue(op, resolved, '时间不合理',
+        `修改后结束时间早于开始时间（${endDate} ${endTime} 早于 ${startDate} ${startTime}），修改未执行。请核对结束日期，夜班通常应填次日`));
+      return;
+    }
     let hours = op['修改后上报加班时数'];
-    if ((hours === '' || hours === undefined || hours === null) && startDate && startTime && endDate && endTime) {
-      hours = computeHours(startDate, startTime, endDate, endTime);
+    if ((hours === '' || hours === undefined || hours === null) && span !== '') {
+      hours = span;
+    }
+    // 时数合理性（数字 / >0 / ≤48）：不合理就不执行这条修改，退回人工核对
+    const hoursProblem = overtimeHoursProblem(hours);
+    if (hoursProblem) {
+      op['定位状态'] = '时数不合理';
+      issues.push(buildLocateIssue(op, resolved, '时数不合理', `修改后${hoursProblem}，修改未执行。请核对是否填错`));
+      return;
     }
     if (startDate) target['加班开始日期'] = startDate;
     if (startTime) target['加班开始时间'] = startTime;
@@ -2128,12 +2350,13 @@ function applyBatchOperations(operations) {
       return;
     }
     if (resolved.hits > 1) {
+      // 同上：删错行不可逆，宁可不删；人补齐「原开始时间」后重导自然能唯一定位
       op['定位状态'] = `多条命中(${resolved.hits})`;
       issues.push(buildLocateIssue(op, resolved, '多条命中',
-        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，仅对序号 ${resolved.target['系统序号']} 执行${op['操作类型']}，请人工确认${buildDeptHint(resolved.candidates, op['班组'])}`));
-    } else {
-      op['定位状态'] = `已定位(${resolved.method})`;
+        `合并大表中存在 ${resolved.hits} 条同工号同日期记录：${describeCandidates(resolved.candidates)}，${op['操作类型']}未执行。请补填「原开始时间」以唯一定位后重新导入${buildDeptHint(resolved.candidates, op['班组'])}`));
+      return;
     }
+    op['定位状态'] = `已定位(${resolved.method})`;
     removeTargets.add(resolved.target);
   });
 
@@ -2150,7 +2373,7 @@ function applyBatchOperations(operations) {
     if (op['操作类型'] === '特殊情况') op['定位状态'] = '无需定位';
   });
 
-  // 无法识别的处置方式（组长写的自由文本，如"删除加班""已改""已调"）不再静默忽略
+  // 无法识别的处置方式（班组考勤员写的自由文本，如"删除加班""已改""已调"）不再静默忽略
   const KNOWN_OPS = ['修改', '删除', '调班', '特殊情况', '未填写'];
   operations.forEach(op => {
     if (KNOWN_OPS.includes(op['操作类型'])) return;
@@ -2174,9 +2397,11 @@ function buildSystemRecords(records) {
       开始日期: start,
       结束日期: end,
       类型: '10 已核准的加班',
-      开始时间: r['加班开始时间'],
-      结束时间: r['加班结束时间'],
-      定额量: r['加班时数'] === '' ? 0 : r['加班时数'],
+      // M5-6：时间补零（真实上传文件 13265 行全是两位小时）；带秒的值顺带截到分（M1 记过的升级路径）
+      开始时间: padTime(r['加班开始时间']),
+      结束时间: padTime(r['加班结束时间']),
+      // M5-2：定额量归一成数字（文本形式的数字也变数字）
+      定额量: toHourNumber(r['加班时数']),
       加班报酬类型: '1 支付加班费',
       加班原因: r['加班原因'] || '',
     };
@@ -2185,7 +2410,9 @@ function buildSystemRecords(records) {
 
 // 根据调班操作构建调班数据记录
 function buildShiftRecords(shiftOps) {
-  return shiftOps.map((op, i) => {
+  // 只导出「真执行过」的调班：定位状态以「已定位」开头（口径同《操作执行记录》，见 exportOperationLog 注释）
+  // 没执行的（未定位 / 多条命中）不能外发：否则调班表说"这天调走了"、大表里那笔加班还在，两份输出互相打架
+  return shiftOps.filter(op => String(op['定位状态'] || '').startsWith('已定位')).map((op, i) => {
     const detail = op['操作详情'] || '';
     const dateMatch = detail.match(/(\d{8})/);
     const codeMatch = detail.match(/(SF\w+|OFF|NS)/);
@@ -2207,6 +2434,12 @@ function buildShiftRecords(shiftOps) {
 
 // 开始新一轮处理，重置会话状态
 function startNewRound() {
+  // M7-1：这不是“再来一轮”，是把本次会话整个清空（大表、异常表、整改表、轮次记录）—— 先让人知情
+  if (typeof window !== 'undefined' && typeof window.confirm === 'function'
+    && !window.confirm('这会清空本次已导入的全部数据（班组表、合并大表、异常表、整改表、轮次记录），确定重新开始？')) {
+    showToast('已取消，数据未改动', 'info');
+    return;
+  }
   appState.groupWorkbook = null;
   appState.groupSheets = [];
   appState.mergedRecords = [];
@@ -2221,6 +2454,8 @@ function startNewRound() {
   appState.groupFailures = [];
   appState.abnormalFailures = [];
   appState.groupDuplicates = [];
+  appState.outputShiftView = 'current';   // M7-2：重置漏了这个（调班记录的本轮/累计视图）
+  appState.isParsing = false;             // M7-2：重置漏了这个（解析中标志）
   appState.fileName = '';
   updateStats();
   goToStep(0);
@@ -2276,17 +2511,9 @@ function exportSystemData(mode = 'current') {
     filename = `总装科月度加班汇总_第${round.roundNo}轮.xlsx`;
   }
 
-  const rows = records.map((r, i) => {
-    const start = toYYYYMMDD(r['加班开始日期']);
-    const end = toYYYYMMDD(r['加班结束日期']);
-    const type = '10 已核准的加班';
-    const payType = '1 支付加班费';
-    return [
-      i + 1, r['工号'], r['姓名'], start, end,
-      type, r['加班开始时间'], r['加班结束时间'],
-      r['加班时数'] === '' ? 0 : r['加班时数'], payType, r['加班原因'] || ''
-    ];
-  });
+  // 2007 的行只由 buildSystemRecords 一个地方生产（快照与导出共用）
+  // —— 以前这里另抄了一份，导致「时间补零 / 定额量归一」只改到快照、没改到导出（M5-2 / M5-6 就是这么漏的）
+  const rows = buildSystemRecords(records).map(r => SYSTEM_OUTPUT_HEADERS.map(h => (r[h] === undefined ? '' : r[h])));
 
   // 前 6 行表头结构（严格匹配上传系统模板格式）
   const headerRows = [
@@ -2368,8 +2595,8 @@ function exportRectify() {
   Object.keys(groups).forEach(group => {
     const rows = groups[group].map(r => {
       return headers.map(h => {
-        // ID 列写入合并大表的系统序号，确保整改回传后能按系统序号正确定位
-        if (h === 'ID') return r['系统序号'] !== undefined ? r['系统序号'] : (r['ID'] !== undefined ? r['ID'] : '');
+        // ID 列原样导出校对系统单号：不要拿大表系统序号覆盖它
+        // （序号只是当次会话的排号，每次导入重发、删除后重排；覆盖掉单号后班组与考勤员就没法跟校对系统对账）
         if (ABNORMAL_HEADERS.includes(h)) return r[h] !== undefined ? r[h] : '';
         return '';
       });
@@ -2459,9 +2686,11 @@ function exportOperationLog() {
     showToast('暂无操作记录，请先执行批量操作', 'error');
     return false;
   }
-  const headers = ['轮次', '系统序号', '工号', '姓名', '班组', '操作类型', '操作详情', '备注'];
+  // 定位状态列：只有「已定位(…)」是真执行过的；未定位 / 多条命中 / 未识别 / 待定位 都是"没动手"
+  // （M2-3 起多条命中不再挑一条执行，所以这份记录必须能区分"记了"和"做了"）
+  const headers = ['轮次', '校对ID', '工号', '姓名', '班组', '操作类型', '定位状态', '操作详情', '备注'];
   const rows = ops.map(op => [
-    op['roundNo'] || 1, op['系统序号'], op['工号'], op['姓名'], op['班组'], op['操作类型'], op['操作详情'], op['备注'] || ''
+    op['roundNo'] || 1, op['校对ID'], op['工号'], op['姓名'], op['班组'], op['操作类型'], op['定位状态'] || '', op['操作详情'], op['备注'] || ''
   ]);
 
   const wb = XLSX.utils.book_new();
@@ -2517,7 +2746,7 @@ function exportAbnormalFailures() {
     showToast('暂无匹配失败记录', 'info');
     return;
   }
-  const headers = [...ABNORMAL_HEADERS, '行号', '失败原因'];
+  const headers = [...ABNORMAL_HEADERS, '行号', '线索', '失败原因'];
   const rows = failures.map(f => headers.map(h => f[h] !== undefined ? f[h] : ''));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([headers, ...rows]), '匹配失败记录');
@@ -2547,7 +2776,7 @@ function exportLocateIssues() {
     showToast('暂无定位异常记录', 'info');
     return;
   }
-  const headers = ['级别', '操作类型', '系统序号', '校对ID', '工号', '姓名', '班组', '原开始日期', '原开始时间', '命中数', '候选序号', '说明'];
+  const headers = ['级别', '操作类型', '系统序号（执行前）', '校对ID', '工号', '姓名', '班组', '原开始日期', '原开始时间', '命中数', '候选序号', '说明'];
   const rows = issues.map(i => headers.map(h => i[h] !== undefined ? i[h] : ''));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([headers, ...rows]), '定位异常清单');
@@ -2611,6 +2840,24 @@ function bindDropZones() {
   });
 }
 
+// M6-1：按区校验“这张表是不是这个区的表”。投错区时直接拒绝 —— 旧行为是取不到定位列后退化成「只按工号匹配」，
+// 结果全部显示「已匹配/多条命中」、失败 0 条，用户以为导入成功了
+const ZONE_TABLE_REQUIREMENTS = {
+  dropZone: { name: '班组填报表', headers: ['工号', '姓名', '加班开始日期', '加班开始时间'] },
+  dropZoneAbnormal: { name: '异常表', headers: ['工号', '开始日期', '开始时间', '上报加班时数'] },
+  dropZoneRectify: { name: '整改表', headers: ['工号', '开始日期', '处置方式'] },
+};
+
+function tableProblem(zoneId, parsed) {
+  const req = ZONE_TABLE_REQUIREMENTS[zoneId];
+  if (!req) return '';
+  const first = (parsed.sheetNames || [])[0];
+  const rows = (parsed.sheets && parsed.sheets[first]) || [];
+  const headers = (rows[0] || []).map(h => String(h === undefined || h === null ? '' : h).trim());
+  const missing = req.headers.filter(h => !headers.includes(h));
+  return missing.length ? `这看起来不是${req.name}（缺少列：${missing.join('、')}）。请确认拖对了文件` : '';
+}
+
 async function handleFile(file, zoneId) {
   const zone = document.getElementById(zoneId);
   const content = zone.querySelector('.zone-content');
@@ -2625,6 +2872,18 @@ async function handleFile(file, zoneId) {
 
   try {
     const parsed = await parseExcel(file);
+    const problem = tableProblem(zoneId, parsed);
+    if (problem) {
+      content.innerHTML = `
+        <div class="w-14 h-14 rounded-2xl bg-apple-red/10 text-apple-red flex items-center justify-center mx-auto mb-4">
+          <i class="ph ph-warning-octagon text-2xl"></i>
+        </div>
+        <div class="text-sm font-medium text-apple-red">文件不对</div>
+        <div class="text-xs text-apple-muted mt-1">${escapeHtml(problem)}</div>
+      `;
+      showToast(problem, 'error');
+      return;
+    }
     appState.fileName = file.name;
 
     if (zoneId === 'dropZone') {
@@ -2644,7 +2903,7 @@ async function handleFile(file, zoneId) {
         <i class="ph ph-x-circle text-2xl"></i>
       </div>
       <div class="text-sm font-medium text-apple-red">解析失败</div>
-      <div class="text-xs text-apple-muted mt-1">${err.message || '请检查文件格式'}</div>
+      <div class="text-xs text-apple-muted mt-1">${escapeHtml(err.message || '请检查文件格式')}</div>
     `;
     showToast('文件解析失败', 'error');
   }
