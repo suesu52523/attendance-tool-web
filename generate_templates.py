@@ -131,7 +131,7 @@ def create_rectify_template():
     ]
     action_headers = [
         '处置方式', '修改后开始日期', '修改后开始时间', '修改后结束日期', '修改后结束时间',
-        '修改后上报加班时数', '调班日期', '调班班次', '特殊情况说明'
+        '修改后上报加班时数', '调班日期', '调班班次', '异常说明（必填）'
     ]
     headers = base_headers + action_headers
 

@@ -274,7 +274,7 @@ const ABNORMAL_HEADERS = [
 
 const RECTIFY_ACTION_HEADERS = [
   '处置方式', '修改后开始日期', '修改后开始时间', '修改后结束日期', '修改后结束时间',
-  '修改后上报加班时数', '调班日期', '调班班次', '特殊情况说明'
+  '修改后上报加班时数', '调班日期', '调班班次', '异常说明（必填）'
 ];
 
 const SYSTEM_OUTPUT_HEADERS = [
@@ -1018,7 +1018,7 @@ function processRectifyWorkbook(parsed) {
           detail = `调班处理：${obj['调班日期']} 导出至 ${shift}`;
         } else {
           opType = '特殊情况';
-          detail = `特殊情况不处理：${obj['特殊情况说明'] || ''}`;
+          detail = `特殊情况不处理：${obj['异常说明（必填）'] || ''}`;
         }
       }
 
@@ -1029,7 +1029,7 @@ function processRectifyWorkbook(parsed) {
         班组: name,
         操作类型: opType,
         操作详情: detail,
-        备注: obj['特殊情况说明'] || '',
+        备注: obj['异常说明（必填）'] || '',
         roundNo: round.roundNo,
         // 定位键：整改表自带的原始加班信息（不依赖校对系统 ID）
         原开始日期: obj['开始日期'] || '',
