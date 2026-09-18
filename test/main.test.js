@@ -1196,6 +1196,38 @@ test('匹配失败记录导出的表里带「线索」一列且非空', () => {
   assert.ok(captured[0].rows[1][headers.indexOf('线索')], '线索不能是空的');
 });
 
+// ==================== M4：没执行的调班不能外发（2026-09-18） ====================
+section('M4 改动执行：调班数据只收「真执行过」的操作');
+
+test('未定位的调班不进调班数据，但要进定位异常清单', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processRectifyWorkbook(rectifyParsed([
+    [11, '10010001', '张三', '底盘一组', '20260809', '15:45', '20260809', '17:35', 1.83, '不处理',
+      '', '', '', '', '', '20260809', 'SF04 双班早班', '已发调班表'],
+  ]));
+  m.confirmBatch();
+  const round = appState.rounds[appState.currentRound];
+  assert.strictEqual(round.shiftRecords.length, 0, '没执行的调班不能进调班数据（否则排班与工资打架）');
+  assert.strictEqual(round.locateIssues.length, 1, '未定位必须进定位异常清单');
+  assert.ok(appState.mergedRecords.some(r => r['工号'] === '10010001'), '没定位到就不能动大表');
+});
+
+test('已定位的调班照常进调班数据，并把那笔加班从大表拿走', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processRectifyWorkbook(rectifyParsed([
+    [12, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '17:35', 1.83, '不处理',
+      '', '', '', '', '', '20260801', 'SF04 双班早班', '已发调班表'],
+  ]));
+  m.confirmBatch();
+  const round = appState.rounds[appState.currentRound];
+  assert.strictEqual(round.shiftRecords.length, 1, '正常调班必须还能出数据');
+  assert.strictEqual(round.shiftRecords[0]['日工作计划'], 'SF04 双班早班');
+  assert.strictEqual(round.shiftRecords[0]['开始日期'], '20260801');
+  assert.ok(!appState.mergedRecords.some(r => r['工号'] === '10010001'), '调班要把那笔加班从大表拿走');
+});
+
 // ==================== 汇总 ====================
 console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`);
 if (failures.length) {

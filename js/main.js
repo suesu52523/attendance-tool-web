@@ -2136,7 +2136,9 @@ function buildSystemRecords(records) {
 
 // 根据调班操作构建调班数据记录
 function buildShiftRecords(shiftOps) {
-  return shiftOps.map((op, i) => {
+  // 只导出「真执行过」的调班：定位状态以「已定位」开头（口径同《操作执行记录》，见 exportOperationLog 注释）
+  // 没执行的（未定位 / 多条命中）不能外发：否则调班表说"这天调走了"、大表里那笔加班还在，两份输出互相打架
+  return shiftOps.filter(op => String(op['定位状态'] || '').startsWith('已定位')).map((op, i) => {
     const detail = op['操作详情'] || '';
     const dateMatch = detail.match(/(\d{8})/);
     const codeMatch = detail.match(/(SF\w+|OFF|NS)/);
