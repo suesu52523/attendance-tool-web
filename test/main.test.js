@@ -1263,6 +1263,41 @@ test('按流程走（异常表→整改表）照常执行', () => {
   assert.strictEqual(appState.rounds[appState.currentRound].status, 'confirmed');
 });
 
+// ==================== M4 边界：同一笔写了多种处置（只提示，不改执行） ====================
+section('M4 边界约束：同一笔两种处置要提前提示');
+
+test('同一笔写了「修改 + 删除」时，整改页提前提示（执行顺序不变）', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([[45, '10010001', '张三', '底盘一组', 20260801, '15:45', 20260801, '17:35', 1.83]]));
+  m.processRectifyWorkbook(rectifyParsed([
+    [45, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '17:35', 1.83, '修改',
+      '20260801', '18:00', '20260801', '21:00', 3, '', '', '改时间'],
+    [46, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '17:35', 1.83, '删除',
+      '', '', '', '', '', '', '', '重复填报'],
+  ]));
+  const html = m.renderRectify();
+  assert.ok(html.includes('两种以上处置'), '要提前告诉人同一笔被写了两种处置');
+  assert.ok(!html.includes('系统会自动按 ID 定位'), '不能再说按 ID 定位（M2 起已改按业务键）');
+  // 执行顺序与结果不变：先修改生效，删除因为原时刻找不到人而进清单
+  m.confirmBatch();
+  const op = appState.rectifyOperations;
+  assert.strictEqual(op[0]['定位状态'], '已定位(业务键)');
+  assert.strictEqual(op[1]['定位状态'], '未定位');
+  assert.strictEqual(appState.rounds[appState.currentRound].locateIssues.length, 1);
+});
+
+test('正常整改表（一笔一种处置）不显示这条提示', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([[45, '10010001', '张三', '底盘一组', 20260801, '15:45', 20260801, '17:35', 1.83]]));
+  m.processRectifyWorkbook(rectifyParsed([
+    [45, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '17:35', 1.83, '删除',
+      '', '', '', '', '', '', '', '重复填报'],
+  ]));
+  assert.ok(!m.renderRectify().includes('两种以上处置'));
+});
+
 // ==================== 汇总 ====================
 console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`);
 if (failures.length) {

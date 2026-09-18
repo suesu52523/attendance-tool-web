@@ -743,6 +743,26 @@ function buildMatchHint(empNo, startDate, reportedHours) {
   return `当天大表里没有；最近一次是 ${best.text}（${best.gap > 0 ? '+' : ''}${best.gap} 天）`;
 }
 
+// 边界检查（只提示，不改执行）：同一笔加班（工号 + 原开始日期 + 原开始时间）在整改表里被写了多种处置
+// 背景：校对系统可能对同一笔加班连报两条异常（提醒「多条记录」），班组若分别填了「改」和「删」就会出现
+// 执行顺序仍是先修改后删除；删不掉的那条进《定位异常清单》。这里只是提前把这种输入摆到人眼前
+function findDispositionConflicts(operations) {
+  const byKey = new Map();
+  (operations || []).forEach(op => {
+    const k = [op['工号'], op['原开始日期'], op['原开始时间']].join('|');
+    if (!byKey.has(k)) byKey.set(k, []);
+    byKey.get(k).push(op);
+  });
+  return [...byKey.values()]
+    .filter(list => list.length > 1 && new Set(list.map(o => o['操作类型'])).size > 1)
+    .map(list => ({
+      工号: list[0]['工号'],
+      姓名: list[0]['姓名'],
+      加班日期: `${list[0]['原开始日期']} ${list[0]['原开始时间']}`,
+      处置: list.map(o => o['操作类型']).join(' + '),
+    }));
+}
+
 // ==================== 步骤 1：导入与合并 ====================
 
 function processGroupWorkbook(parsed) {
@@ -1494,6 +1514,7 @@ function renderRectify() {
   const hasFile = !!appState.rectifyWorkbook;
   const isDemo = !hasFile;
   const locateIssues = round.locateIssues || [];
+  const conflicts = findDispositionConflicts(operations);
   const stats = { 修改: 0, 删除: 0, 调班: 0, 特殊情况: 0, 未填写: 0 };
   operations.forEach(op => {
     const t = op['操作类型'];
@@ -1537,7 +1558,7 @@ function renderRectify() {
           <div class="mt-5 p-4 rounded-2xl bg-apple-green/5 border border-apple-green/10">
             <div class="flex items-start gap-2 text-sm text-apple-green">
               <i class="ph ph-check-circle mt-0.5"></i>
-              <span>无需同步导入合并大表，系统会自动按 ID 定位。</span>
+              <span>无需同步导入合并大表，系统按「工号 + 原开始日期 + 原开始时间」定位。</span>
             </div>
           </div>
 
@@ -1546,6 +1567,21 @@ function renderRectify() {
               <div class="flex items-start gap-2 text-sm text-apple-red">
                 <i class="ph ph-warning-circle mt-0.5"></i>
                 <span>有 ${stats['未填写']} 条记录未填写处置方式，请在整改表中补充填写后重新导入，否则无法执行批量操作。</span>
+              </div>
+            </div>
+          ` : ''}
+
+          ${conflicts.length ? `
+            <div class="mt-4 p-4 rounded-2xl bg-apple-orange/5 border border-apple-orange/20">
+              <div class="flex items-start gap-2 text-sm text-apple-orange">
+                <i class="ph ph-warning mt-0.5"></i>
+                <div>
+                  <div>有 ${conflicts.length} 笔加班写了<b>两种以上处置</b>：执行时仍按「先修改、再删除」的顺序走，删不掉的那条会进入定位异常清单，请先确认是不是同一笔被重复填报。</div>
+                  <div class="text-xs text-apple-muted mt-1">
+                    ${conflicts.slice(0, 3).map(c => `· ${c['工号']} ${c['姓名']} ${c['加班日期']}：${c['处置']}`).join('<br>')}
+                    ${conflicts.length > 3 ? `<br>· 共 ${conflicts.length} 笔，其余略` : ''}
+                  </div>
+                </div>
               </div>
             </div>
           ` : ''}
