@@ -45,6 +45,9 @@ const documentStub = {
   createElement() { return makeElement(); },
   body: makeElement(),
 };
+// 浏览器原生确认框的桩：默认「点确定」，用例可临时改成 false 模拟「点取消」
+let confirmAnswer = true;
+globalThis.window = { confirm: () => confirmAnswer };
 globalThis.Blob = class { };
 globalThis.URL = { createObjectURL: () => 'blob:x', revokeObjectURL() {} };
 
@@ -1020,7 +1023,7 @@ test('整改表往返：定位到的操作，校对ID 仍是校对单号，系�
   assert.ok(!appState.mergedRecords.some(r => r['工号'] === '10010002'), '按业务键删掉李四那条');
 });
 
-test('定位异常清单：校对ID=校对单号；系统序号只在实际有目标行时填，定位不到就留空', () => {
+test('定位异常清单：校对ID=校对单号；系统序号（执行前）只在实际有目标行时填，定位不到就留空', () => {
   resetState();
   appState.mergedRecords = makeMergedRecords();
   // 手工填的整改表（或班组改过工号）：ID 是校对单号 901，但大表里没有 99999999 这个人
@@ -1032,11 +1035,11 @@ test('定位异常清单：校对ID=校对单号；系统序号只在实际有�
   const miss = res.issues.find(i => i['工号'] === '99999999');
   assert.ok(miss, '查无此人 → 进清单');
   assert.strictEqual(String(miss['校对ID']), '901', '校对ID 列应是校对单号');
-  assert.strictEqual(miss['系统序号'], '', '未定位就没有大表行号，不能拿校对单号冒充');
+  assert.strictEqual(miss['系统序号（执行前）'], '', '未定位就没有大表行号，不能拿校对单号冒充');
   const multi = res.issues.find(i => i['工号'] === '10010003');
   if (multi) {
     assert.strictEqual(String(multi['校对ID']), '902');
-    assert.strictEqual(multi['系统序号'], 2, '多条命中时，系统序号 应是实际作用的那一行');
+    assert.strictEqual(multi['系统序号（执行前）'], 2, '多条命中时，编号应是实际作用的那一行（执行前编号）');
   }
 });
 
@@ -1296,6 +1299,69 @@ test('正常整改表（一笔一种处置）不显示这条提示', () => {
       '', '', '', '', '', '', '', '重复填报'],
   ]));
   assert.ok(!m.renderRectify().includes('两种以上处置'));
+});
+
+// ==================== M4-4 / M4-5（2026-09-18） ====================
+section('M4-4 删除前确认 · M4-5 清单编号标注为「执行前」');
+
+test('M4-4 删除前先确认：点「取消」什么都不做，再点并确认才执行', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([[45, '10010001', '张三', '底盘一组', 20260801, '15:45', 20260801, '17:35', 1.83]]));
+  m.processRectifyWorkbook(rectifyParsed([
+    [45, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '17:35', 1.83, '删除', '', '', '', '', '', '', '', '重复填报'],
+  ]));
+  const before = appState.mergedRecords.length;
+  confirmAnswer = false;
+  m.confirmBatch();
+  assert.strictEqual(appState.mergedRecords.length, before, '点取消后一行都不能删');
+  assert.notStrictEqual(appState.rounds[appState.currentRound].status, 'confirmed', '取消后不能标记已执行');
+  confirmAnswer = true;
+  m.confirmBatch();
+  assert.strictEqual(appState.mergedRecords.length, before - 1, '确认后照常执行');
+});
+
+test('M4-4 只有修改（没有删除/调班）时不弹确认框', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([[45, '10010001', '张三', '底盘一组', 20260801, '15:45', 20260801, '17:35', 1.83]]));
+  m.processRectifyWorkbook(rectifyParsed([
+    [45, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '17:35', 1.83, '修改',
+      '20260801', '18:00', '20260801', '21:00', 3, '', '', '改时间'],
+  ]));
+  let asked = 0;
+  const oldConfirm = globalThis.window.confirm;
+  globalThis.window.confirm = () => { asked++; return true; };
+  m.confirmBatch();
+  globalThis.window.confirm = oldConfirm;
+  assert.strictEqual(asked, 0, '不删东西就别打扰人');
+  assert.strictEqual(appState.mergedRecords.find(r => r['工号'] === '10010001')['加班时数'], 3, '修改照常生效');
+});
+
+test('M4-5 定位异常清单里，编号标成「执行前」并保留校对ID', () => {
+  resetState();
+  m.processGroupWorkbook({ fileName: 'g.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    ['序号', '工号', '姓名', '班组', '加班开始日期', '加班开始时间', '加班结束日期', '加班结束时间', '加班时数', '加班原因', '加班类别', '科负责人核准'],
+    [1, '1001', '张三', '一组', '2026-08-01', '15:45', '2026-08-01', '18:45', 3, 'x', '工作日', '核准'],
+    [2, '1002', '李四', '一组', '2026-08-02', '15:45', '2026-08-02', '18:45', 3, 'x', '工作日', '核准'],
+    [3, '1002', '李四', '一组', '2026-08-02', '15:45', '2026-08-02', '19:45', 4, 'x', '工作日', '核准'],
+  ] } });
+  m.processAbnormalWorkbook(abnormalParsed([
+    [20, '1002', '李四', '一组', 20260802, '15:45', 20260802, '18:45', 3],
+    [21, '1001', '张三', '一组', 20260801, '15:45', 20260801, '18:45', 3],
+  ]));
+  // 一条多条命中（挑不准，未执行）+ 一条删除（会重排全表编号）
+  m.processRectifyWorkbook(rectifyParsed([
+    [20, '1002', '李四', '一组', '20260802', '15:45', '20260802', '18:45', 3, '修改', '20260802', '19:00', '20260802', '20:00', 1, '', '', '多条记录'],
+    [21, '1001', '张三', '一组', '20260801', '15:45', '20260801', '18:45', 3, '删除', '', '', '', '', '', '', '', '重复填报'],
+  ]));
+  m.confirmBatch();
+  captured = [];
+  m.exportLocateIssues();
+  const headers = captured[0].rows[0];
+  assert.ok(headers.includes('系统序号（执行前）'), '编号列要标明是「执行前」的：' + JSON.stringify(headers));
+  assert.ok(headers.includes('校对ID'), '校对单号要保留（班组/考勤员用它对账）');
+  assert.ok(!headers.includes('系统序号'), '不能再叫光秃秃的「系统序号」（删完就不是那个意思了）');
 });
 
 // ==================== 汇总 ====================

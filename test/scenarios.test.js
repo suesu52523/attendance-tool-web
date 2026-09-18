@@ -42,6 +42,9 @@ const documentStub = {
   createElement() { return makeElement(); },
   body: makeElement(),
 };
+// 浏览器原生确认框的桩：默认「点确定」，用例可临时改成 false 模拟「点取消」
+let confirmAnswer = true;
+globalThis.window = { confirm: () => confirmAnswer };
 globalThis.Blob = class { };
 globalThis.URL = { createObjectURL: () => 'blob:x', revokeObjectURL() {} };
 

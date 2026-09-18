@@ -696,7 +696,8 @@ function buildLocateIssue(op, resolved, level, message) {
   const candidates = (resolved && resolved.candidates) || [];
   return {
     级别: level,
-    系统序号: (resolved && resolved.target) ? resolved.target['系统序号'] : '',
+    // 标明是「执行前」的编号：删除会把全表序号重排成 1..N，删完之后这个号可能指向别人
+    '系统序号（执行前）': (resolved && resolved.target) ? resolved.target['系统序号'] : '',
     校对ID: op['校对ID'] || '',
     工号: op['工号'],
     姓名: op['姓名'],
@@ -2007,6 +2008,20 @@ function confirmBatch() {
     return;
   }
 
+  // M4-4：真要动删除/调班之前，给一次后悔机会（原生确认框；点「取消」什么都不做）
+  // 只有修改时不打扰（修改可再改回来，删除不可逆）
+  const removeCount = ops.filter(o => o['操作类型'] === '删除' || o['操作类型'] === '调班').length;
+  if (removeCount > 0 && typeof window !== 'undefined' && typeof window.confirm === 'function') {
+    const modifyCount = ops.filter(o => o['操作类型'] === '修改').length;
+    const ok = window.confirm(
+      `本轮将执行：修改 ${modifyCount} 行，删除 / 调班 ${removeCount} 行。\n删除不可撤销（删了要重新导入班组表重建），确定执行？`
+    );
+    if (!ok) {
+      showToast('已取消执行，数据未改动。可再核对一遍整改表后重新点执行', 'info');
+      return;
+    }
+  }
+
   // 执行实际的批量操作：修改/删除/调班
   // 未定位/多条命中的操作不再静默跳过，而是进入本轮定位异常清单
   const result = applyBatchOperations(ops);
@@ -2517,7 +2532,7 @@ function exportLocateIssues() {
     showToast('暂无定位异常记录', 'info');
     return;
   }
-  const headers = ['级别', '操作类型', '系统序号', '校对ID', '工号', '姓名', '班组', '原开始日期', '原开始时间', '命中数', '候选序号', '说明'];
+  const headers = ['级别', '操作类型', '系统序号（执行前）', '校对ID', '工号', '姓名', '班组', '原开始日期', '原开始时间', '命中数', '候选序号', '说明'];
   const rows = issues.map(i => headers.map(h => i[h] !== undefined ? i[h] : ''));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([headers, ...rows]), '定位异常清单');
