@@ -155,7 +155,108 @@ function getWorkflowStatus() {
   };
 }
 
-// 业务字段定义
+// ==================== 流程约束：只有无异常时才允许继续 ====================
+
+// 步骤1校验：班组填报表导入后是否有校验失败或重复填报
+function getImportBlockers() {
+  const blockers = [];
+  if (!appState.groupWorkbook) {
+    blockers.push('尚未导入班组填报表');
+    return blockers;
+  }
+  const failures = appState.groupFailures || [];
+  if (failures.length) {
+    blockers.push(`有 ${failures.length} 条校验失败记录（工号/姓名/日期/时间为空或格式错误），请修正后重新导入`);
+  }
+  const duplicates = appState.groupDuplicates || [];
+  if (duplicates.length) {
+    blockers.push(`有 ${duplicates.length} 组重复填报（同一工号同一天同一开始时间出现多次），请清理后重新导入`);
+  }
+  return blockers;
+}
+
+// 步骤2校验：异常表导入后是否有匹配失败或需人工核对的异常
+function getAbnormalBlockers() {
+  const blockers = [];
+  const round = getCurrentRound();
+  if (!round.abnormalRecords.length) {
+    blockers.push('尚未导入异常表');
+    return blockers;
+  }
+  const failures = round.abnormalFailures || appState.abnormalFailures || [];
+  if (failures.length) {
+    blockers.push(`有 ${failures.length} 条匹配失败记录（无法在合并大表中定位），请核对工号/日期/时间后修正异常表并重新导入`);
+  }
+  const warnings = round.abnormalWarnings || [];
+  if (warnings.length) {
+    blockers.push(`有 ${warnings.length} 条需人工核对（多条命中或姓名不一致），请在异常表补填「开始时间」或清理合并大表后重新导入`);
+  }
+  // 检查异常表内部数据是否有结束时间早于开始时间等数据问题
+  const dateIssues = (round.abnormalRecords || []).filter(r => {
+    const st = String(r['开始时间'] || '').trim();
+    const et = String(r['结束时间'] || '').trim();
+    if (!st || !et) return false;
+    const stParts = parseTimeParts(st);
+    const etParts = parseTimeParts(et);
+    if (!stParts || !etParts) return false;
+    return stParts.h > etParts.h || (stParts.h === etParts.h && stParts.m > etParts.m);
+  });
+  if (dateIssues.length) {
+    blockers.push(`有 ${dateIssues.length} 条记录的结束时间早于开始时间，请修正后重新导入`);
+  }
+  return blockers;
+}
+
+// 步骤3校验：整改表导入后是否有未填写处置方式或定位异常
+function getRectifyBlockers() {
+  const blockers = [];
+  const round = getCurrentRound();
+  if (!round.rectifyOperations.length) {
+    blockers.push('尚未导入整改表');
+    return blockers;
+  }
+  const ops = round.rectifyOperations || appState.rectifyOperations || [];
+  const unfilled = ops.filter(o => o['操作类型'] === '未填写').length;
+  if (unfilled > 0) {
+    blockers.push(`有 ${unfilled} 条记录未填写处置方式，请在整改表中补充填写后重新导入`);
+  }
+  // 检查修改类操作的修改后数据是否有结束时间早于开始时间
+  const modifyIssues = ops.filter(op => {
+    if (op['操作类型'] !== '修改') return false;
+    const st = String(op['修改后开始时间'] || '').trim();
+    const et = String(op['修改后结束时间'] || '').trim();
+    if (!st || !et) return false;
+    const stParts = parseTimeParts(st);
+    const etParts = parseTimeParts(et);
+    if (!stParts || !etParts) return false;
+    return stParts.h > etParts.h || (stParts.h === etParts.h && stParts.m > etParts.m);
+  });
+  if (modifyIssues.length) {
+    blockers.push(`有 ${modifyIssues.length} 条修改操作的结束时间早于开始时间，请修正后重新导入`);
+  }
+  return blockers;
+}
+
+// 综合校验：判断从当前步骤是否可以继续到下一步
+function canProceedToStep(targetStep) {
+  // 允许回退到之前的步骤
+  if (targetStep <= currentStep) return { ok: true, blockers: [] };
+
+  const blockers = [];
+  // 从当前步骤到目标步骤之间的每一步都必须通过校验
+  for (let s = currentStep; s < targetStep; s++) {
+    if (s === 1 && getImportBlockers().length) {
+      blockers.push(...getImportBlockers());
+    }
+    if (s === 2 && getAbnormalBlockers().length) {
+      blockers.push(...getAbnormalBlockers());
+    }
+    if (s === 3 && getRectifyBlockers().length) {
+      blockers.push(...getRectifyBlockers());
+    }
+  }
+  return { ok: blockers.length === 0, blockers };
+}
 const GROUP_HEADERS = [
   '序号', '工号', '姓名', '班组',
   '加班开始日期', '加班开始时间', '加班结束日期', '加班结束时间', '加班时数',
@@ -270,6 +371,14 @@ function renderNav() {
 }
 
 function goToStep(index) {
+  // 流程约束：前进到后续步骤时，检查中间步骤是否全部通过校验
+  if (index > currentStep) {
+    const { ok, blockers } = canProceedToStep(index);
+    if (!ok) {
+      showToast(`无法继续，请先解决以下问题：\n${blockers.join('\n')}`, 'error');
+      return;
+    }
+  }
   currentStep = index;
   renderNav();
   renderContent();
@@ -956,10 +1065,10 @@ function renderOverview() {
 
   // 流程指引卡片使用实际数据状态，不依赖 finalGenerated
   const flowStates = [
-    { key: 'import', label: '导入与合并', subtitle: '读取班组填报表并生成合并大表', done: wf.hasGroup, badge: wf.hasGroup ? '已完成' : '待处理' },
-    { key: 'abnormal', label: '异常处理', subtitle: '导入校对异常表并生成整改表', done: wf.hasAbnormal, badge: wf.hasAbnormal ? `第${round.roundNo}轮` : '待处理' },
-    { key: 'rectify', label: '整改与批量操作', subtitle: '导入整改表并执行批量操作', done: wf.hasRectify, badge: wf.hasRectify ? `第${round.roundNo}轮` : '待处理' },
-    { key: 'output', label: '输出与审计', subtitle: '导出最终文件并查看操作记录', done: wf.finalGenerated, badge: wf.finalGenerated ? '已完成' : '待生成' },
+    { key: 'import', label: '导入与合并', subtitle: '读取班组填报表并生成合并大表', done: wf.hasGroup, badge: wf.hasGroup ? '已完成' : '待处理', blockers: wf.hasGroup ? getImportBlockers() : [] },
+    { key: 'abnormal', label: '异常处理', subtitle: '导入校对异常表并生成整改表', done: wf.hasAbnormal, badge: wf.hasAbnormal ? `第${round.roundNo}轮` : '待处理', blockers: wf.hasAbnormal ? getAbnormalBlockers() : [] },
+    { key: 'rectify', label: '整改与批量操作', subtitle: '导入整改表并执行批量操作', done: wf.hasRectify, badge: wf.hasRectify ? `第${round.roundNo}轮` : '待处理', blockers: wf.hasRectify ? getRectifyBlockers() : [] },
+    { key: 'output', label: '输出与审计', subtitle: '导出最终文件并查看操作记录', done: wf.finalGenerated, badge: wf.finalGenerated ? '已完成' : '待生成', blockers: [] },
   ];
 
   return `
@@ -970,17 +1079,19 @@ function renderOverview() {
         <div class="space-y-4">
           ${flowStates.map((flow, index) => {
             const stepIndex = index + 1;
+            const hasBlockers = flow.blockers && flow.blockers.length > 0;
             return `
-              <div class="flex items-start gap-4 p-4 rounded-2xl border ${flow.done ? 'border-apple-green/20 bg-apple-green/5' : 'border-apple-border bg-apple-gray/30'} hover:bg-apple-gray/50 transition-colors cursor-pointer" onclick="goToStep(${stepIndex})">
-                <div class="w-10 h-10 rounded-xl ${flow.done ? 'bg-apple-green text-white' : 'bg-apple-card border border-apple-border text-apple-blue'} flex items-center justify-center shrink-0 font-semibold">
-                  ${flow.done ? '<i class="ph ph-check"></i>' : stepIndex}
+              <div class="flex items-start gap-4 p-4 rounded-2xl border ${flow.done && !hasBlockers ? 'border-apple-green/20 bg-apple-green/5' : hasBlockers ? 'border-apple-red/20 bg-apple-red/5' : 'border-apple-border bg-apple-gray/30'} hover:bg-apple-gray/50 transition-colors cursor-pointer" onclick="goToStep(${stepIndex})">
+                <div class="w-10 h-10 rounded-xl ${flow.done && !hasBlockers ? 'bg-apple-green text-white' : hasBlockers ? 'bg-apple-red text-white' : 'bg-apple-card border border-apple-border text-apple-blue'} flex items-center justify-center shrink-0 font-semibold">
+                  ${flow.done && !hasBlockers ? '<i class="ph ph-check"></i>' : hasBlockers ? '<i class="ph ph-warning"></i>' : stepIndex}
                 </div>
                 <div class="flex-1 min-w-0">
                   <div class="font-semibold flex items-center gap-2">
                     ${flow.label}
-                    <span class="badge ${flow.done ? 'badge-success' : 'badge-muted'} text-xs">${flow.badge}</span>
+                    <span class="badge ${flow.done && !hasBlockers ? 'badge-success' : hasBlockers ? 'badge-danger' : 'badge-muted'} text-xs">${hasBlockers ? '校验未通过' : flow.badge}</span>
                   </div>
                   <div class="text-sm text-apple-muted mt-0.5">${flow.subtitle}</div>
+                  ${hasBlockers ? `<div class="mt-2 text-xs text-apple-red space-y-1">${flow.blockers.map(b => `<div>· ${b}</div>`).join('')}</div>` : ''}
                 </div>
                 <i class="ph ph-caret-right text-apple-muted text-xl"></i>
               </div>
@@ -1145,10 +1256,35 @@ function renderImport() {
 
           ${hasFile ? `
             <div class="mt-5 space-y-3">
-              <button onclick="exportMergedAndContinue()" class="w-full h-11 rounded-full bg-apple-blue text-white text-sm font-medium hover:bg-apple-blue-hover transition-colors shadow-sm inline-flex items-center justify-center gap-2">
-                <i class="ph ph-download-simple"></i>
-                导出合并大表并继续
-              </button>
+              ${(() => {
+                const blockers = getImportBlockers();
+                if (blockers.length) {
+                  return `
+                    <div class="p-4 rounded-2xl bg-apple-red/5 border border-apple-red/20">
+                      <div class="flex items-start gap-2 text-sm text-apple-red">
+                        <i class="ph ph-warning-circle mt-0.5 text-lg shrink-0"></i>
+                        <div>
+                          <div class="font-medium">数据校验未通过，无法继续</div>
+                          <ul class="mt-1 space-y-1 text-xs">
+                            ${blockers.map(b => `<li>· ${b}</li>`).join('')}
+                          </ul>
+                          <div class="mt-2 text-apple-muted">请修正数据后重新导入班组填报表，全部校验通过后才能继续下一步。</div>
+                        </div>
+                      </div>
+                    </div>
+                    <button disabled class="w-full h-11 rounded-full bg-apple-gray text-apple-muted text-sm font-medium cursor-not-allowed inline-flex items-center justify-center gap-2">
+                      <i class="ph ph-lock"></i>
+                      导出合并大表并继续（需先修正异常）
+                    </button>
+                  `;
+                }
+                return `
+                  <button onclick="exportMergedAndContinue()" class="w-full h-11 rounded-full bg-apple-blue text-white text-sm font-medium hover:bg-apple-blue-hover transition-colors shadow-sm inline-flex items-center justify-center gap-2">
+                    <i class="ph ph-download-simple"></i>
+                    导出合并大表并继续
+                  </button>
+                `;
+              })()}
               ${failureCount > 0 ? `
                 <button onclick="exportGroupFailures()" class="w-full h-11 rounded-full bg-apple-red/10 text-apple-red text-sm font-medium hover:bg-apple-red/20 transition-colors inline-flex items-center justify-center gap-2">
                   <i class="ph ph-warning"></i>
@@ -1297,10 +1433,35 @@ function renderAbnormal() {
 
           ${hasFile ? `
             <div class="mt-5 space-y-3">
-              <button onclick="exportRectify()" class="w-full h-11 rounded-full bg-apple-blue text-white text-sm font-medium hover:bg-apple-blue-hover transition-colors shadow-sm inline-flex items-center justify-center gap-2">
-                <i class="ph ph-file-plus"></i>
-                生成整改表
-              </button>
+              ${(() => {
+                const blockers = getAbnormalBlockers();
+                if (blockers.length) {
+                  return `
+                    <div class="p-4 rounded-2xl bg-apple-red/5 border border-apple-red/20">
+                      <div class="flex items-start gap-2 text-sm text-apple-red">
+                        <i class="ph ph-warning-circle mt-0.5 text-lg shrink-0"></i>
+                        <div>
+                          <div class="font-medium">数据校验未通过，无法继续</div>
+                          <ul class="mt-1 space-y-1 text-xs">
+                            ${blockers.map(b => `<li>· ${b}</li>`).join('')}
+                          </ul>
+                          <div class="mt-2 text-apple-muted">请修正异常表数据后重新导入，全部校验通过后才能生成整改表。</div>
+                        </div>
+                      </div>
+                    </div>
+                    <button disabled class="w-full h-11 rounded-full bg-apple-gray text-apple-muted text-sm font-medium cursor-not-allowed inline-flex items-center justify-center gap-2">
+                      <i class="ph ph-lock"></i>
+                      生成整改表（需先修正异常）
+                    </button>
+                  `;
+                }
+                return `
+                  <button onclick="exportRectify()" class="w-full h-11 rounded-full bg-apple-blue text-white text-sm font-medium hover:bg-apple-blue-hover transition-colors shadow-sm inline-flex items-center justify-center gap-2">
+                    <i class="ph ph-file-plus"></i>
+                    生成整改表
+                  </button>
+                `;
+              })()}
               ${failureCount > 0 ? `
                 <button onclick="exportAbnormalFailures()" class="w-full h-11 rounded-full bg-apple-red/10 text-apple-red text-sm font-medium hover:bg-apple-red/20 transition-colors inline-flex items-center justify-center gap-2">
                   <i class="ph ph-warning"></i>
@@ -1416,10 +1577,35 @@ function renderRectify() {
 
           ${hasFile ? `
             <div class="mt-5 space-y-3">
-              <button onclick="confirmBatch()" class="w-full h-11 rounded-full bg-apple-blue text-white text-sm font-medium hover:bg-apple-blue-hover transition-colors shadow-sm inline-flex items-center justify-center gap-2">
-                <i class="ph ph-check-circle"></i>
-                确认执行第 ${round.roundNo} 轮批量操作
-              </button>
+              ${(() => {
+                const blockers = getRectifyBlockers();
+                if (blockers.length) {
+                  return `
+                    <div class="p-4 rounded-2xl bg-apple-red/5 border border-apple-red/20">
+                      <div class="flex items-start gap-2 text-sm text-apple-red">
+                        <i class="ph ph-warning-circle mt-0.5 text-lg shrink-0"></i>
+                        <div>
+                          <div class="font-medium">数据校验未通过，无法执行</div>
+                          <ul class="mt-1 space-y-1 text-xs">
+                            ${blockers.map(b => `<li>· ${b}</li>`).join('')}
+                          </ul>
+                          <div class="mt-2 text-apple-muted">请修正整改表数据后重新导入，全部校验通过后才能执行批量操作。</div>
+                        </div>
+                      </div>
+                    </div>
+                    <button disabled class="w-full h-11 rounded-full bg-apple-gray text-apple-muted text-sm font-medium cursor-not-allowed inline-flex items-center justify-center gap-2">
+                      <i class="ph ph-lock"></i>
+                      确认执行第 ${round.roundNo} 轮批量操作（需先修正异常）
+                    </button>
+                  `;
+                }
+                return `
+                  <button onclick="confirmBatch()" class="w-full h-11 rounded-full bg-apple-blue text-white text-sm font-medium hover:bg-apple-blue-hover transition-colors shadow-sm inline-flex items-center justify-center gap-2">
+                    <i class="ph ph-check-circle"></i>
+                    确认执行第 ${round.roundNo} 轮批量操作
+                  </button>
+                `;
+              })()}
             </div>
           ` : ''}
 
@@ -1845,6 +2031,13 @@ function confirmBatch() {
 
   const ops = appState.rectifyOperations;
 
+  // 流程约束：整改表有未填写处置方式或修改后时间异常时阻止执行
+  const blockers = getRectifyBlockers();
+  if (blockers.length) {
+    showToast(`数据校验未通过，无法执行批量操作：\n${blockers.join('\n')}`, 'error');
+    return;
+  }
+
   // 存在未填写处置方式的记录时，阻止执行并提示补充
   const unfilled = ops.filter(o => o['操作类型'] === '未填写').length;
   if (unfilled > 0) {
@@ -2127,6 +2320,12 @@ function exportSystemData(mode = 'current') {
 
 // 步骤2：导出合并大表（系统模板格式）并继续到异常处理
 function exportMergedAndContinue() {
+  // 流程约束：有校验失败或重复填报时不允许继续
+  const blockers = getImportBlockers();
+  if (blockers.length) {
+    showToast(`数据校验未通过，无法继续：\n${blockers.join('\n')}`, 'error');
+    return;
+  }
   if (!appState.mergedRecords.length) {
     showToast('请先导入班组填报表', 'error');
     return;
@@ -2139,6 +2338,12 @@ function exportMergedAndContinue() {
 }
 
 function exportRectify() {
+  // 流程约束：有匹配失败或需人工核对的异常时不允许生成整改表
+  const blockers = getAbnormalBlockers();
+  if (blockers.length) {
+    showToast(`数据校验未通过，无法生成整改表：\n${blockers.join('\n')}`, 'error');
+    return false;
+  }
   if (!appState.abnormalRecords.length) {
     showToast('尚无异常记录，请先导入异常表', 'error');
     return false;
