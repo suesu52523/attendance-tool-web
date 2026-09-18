@@ -198,6 +198,15 @@ function overtimeHoursProblem(hours) {
   return '';
 }
 
+// 导出用的定额量：必须是数字（真实上传文件 13265 行该格全是数字）
+// 文本形式的数字（"2.5"）归一成数字；非数字原样保留（这类值 M3 导入校验已拦过）
+function toHourNumber(hours) {
+  if (hours === '' || hours === undefined || hours === null) return 0;
+  if (typeof hours === 'number') return hours;
+  const n = Number(String(hours).trim());
+  return Number.isFinite(n) ? n : hours;
+}
+
 const SHIFT_MAIN_HEADERS = ['中文名称', '工号', '姓名', '开始日期', '结束日期', '日工作计划'];
 const SHIFT_SHEET2_HEADERS = ['中文名称', '工号', '姓名', '开始日期', '结束日期', '日工作计划', '出勤项目分类', '备注'];
 
@@ -2183,9 +2192,11 @@ function buildSystemRecords(records) {
       开始日期: start,
       结束日期: end,
       类型: '10 已核准的加班',
-      开始时间: r['加班开始时间'],
-      结束时间: r['加班结束时间'],
-      定额量: r['加班时数'] === '' ? 0 : r['加班时数'],
+      // M5-6：时间补零（真实上传文件 13265 行全是两位小时）；带秒的值顺带截到分（M1 记过的升级路径）
+      开始时间: padTime(r['加班开始时间']),
+      结束时间: padTime(r['加班结束时间']),
+      // M5-2：定额量归一成数字（文本形式的数字也变数字）
+      定额量: toHourNumber(r['加班时数']),
       加班报酬类型: '1 支付加班费',
       加班原因: r['加班原因'] || '',
     };
@@ -2287,17 +2298,9 @@ function exportSystemData(mode = 'current') {
     filename = `总装科月度加班汇总_第${round.roundNo}轮.xlsx`;
   }
 
-  const rows = records.map((r, i) => {
-    const start = toYYYYMMDD(r['加班开始日期']);
-    const end = toYYYYMMDD(r['加班结束日期']);
-    const type = '10 已核准的加班';
-    const payType = '1 支付加班费';
-    return [
-      i + 1, r['工号'], r['姓名'], start, end,
-      type, r['加班开始时间'], r['加班结束时间'],
-      r['加班时数'] === '' ? 0 : r['加班时数'], payType, r['加班原因'] || ''
-    ];
-  });
+  // 2007 的行只由 buildSystemRecords 一个地方生产（快照与导出共用）
+  // —— 以前这里另抄了一份，导致「时间补零 / 定额量归一」只改到快照、没改到导出（M5-2 / M5-6 就是这么漏的）
+  const rows = buildSystemRecords(records).map(r => SYSTEM_OUTPUT_HEADERS.map(h => (r[h] === undefined ? '' : r[h])));
 
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet([SYSTEM_OUTPUT_HEADERS, ...rows]);

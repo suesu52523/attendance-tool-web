@@ -1364,6 +1364,41 @@ test('M4-5 定位异常清单里，编号标成「执行前」并保留校对ID'
   assert.ok(!headers.includes('系统序号'), '不能再叫光秃秃的「系统序号」（删完就不是那个意思了）');
 });
 
+// ==================== M5 出文件（2026-09-18） ====================
+section('M5 出文件：时间补零 / 定额量必须是数字');
+
+test('M5-6 导出 2007 的时间补零（7:00 → 07:00），带秒的截到分', () => {
+  resetState();
+  m.processGroupWorkbook({ fileName: 'g.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    ['序号', '工号', '姓名', '班组', '加班开始日期', '加班开始时间', '加班结束日期', '加班结束时间', '加班时数', '加班原因', '加班类别', '科负责人核准'],
+    [1, '00151177', '童辉武', '一组', '2026-08-01', '7:00', '2026-08-01', '8:45', 1.75, 'x', '工作日', '核准'],
+    [2, '00151177', '童辉武', '一组', '2026-08-02', '15:45:30', '2026-08-02', '18:45', 3, 'x', '工作日', '核准'],
+  ] } });
+  captured = [];
+  m.exportSystemData('merged');
+  const rows = captured[0].rows;
+  assert.strictEqual(rows[1][6], '07:00', '开始时间要两位小时（真实上传文件 13265 行全两位）');
+  assert.strictEqual(rows[1][7], '08:45', '结束时间要两位小时');
+  assert.strictEqual(rows[2][6], '15:45', '带秒的截到分（M1 记过的升级路径）');
+  assert.strictEqual(rows[2][7], '18:45');
+});
+
+test('M5-2 文本形式的数字时数，导出时归一成数字（真实文件那格是数字）', () => {
+  resetState();
+  m.processGroupWorkbook({ fileName: 'g.xlsx', sheetNames: ['一组'], sheets: { 一组: [
+    ['序号', '工号', '姓名', '班组', '加班开始日期', '加班开始时间', '加班结束日期', '加班结束时间', '加班时数', '加班原因', '加班类别', '科负责人核准'],
+    [1, '00151177', '童辉武', '一组', '2026-08-01', '15:45', '2026-08-01', '17:55', '2.5', 'x', '工作日', '核准'],
+    [2, '00151177', '童辉武', '一组', '2026-08-02', '15:45', '2026-08-02', '18:45', 3, 'x', '工作日', '核准'],
+  ] } });
+  captured = [];
+  m.exportSystemData('merged');
+  const rows = captured[0].rows;
+  assert.strictEqual(typeof rows[1][8], 'number', '文本数字要变成数字：' + JSON.stringify(rows[1][8]));
+  assert.strictEqual(rows[1][8], 2.5);
+  assert.strictEqual(typeof rows[2][8], 'number', '本来就是数字的照旧');
+  assert.strictEqual(rows[2][8], 3);
+});
+
 // ==================== 汇总 ====================
 console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`);
 if (failures.length) {
