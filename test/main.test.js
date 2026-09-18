@@ -60,7 +60,9 @@ return {
   processGroupWorkbook, processAbnormalWorkbook, processRectifyWorkbook, confirmBatch,
   buildSystemRecords, buildShiftRecords,
   renderImport, renderAbnormal, renderRectify, renderOutput,
+  renderTable,
   exportSystemData, exportRectify, exportShiftData, exportAbnormalFailures, exportLocateIssues, exportOperationLog,
+  tableProblem, escapeHtml, startNewRound,
 };`);
 
 const m = factory(xlsxStub, documentStub, console);
@@ -1397,6 +1399,57 @@ test('M5-2 文本形式的数字时数，导出时归一成数字（真实文件
   assert.strictEqual(rows[1][8], 2.5);
   assert.strictEqual(typeof rows[2][8], 'number', '本来就是数字的照旧');
   assert.strictEqual(rows[2][8], 3);
+});
+
+// ==================== M6/M7/M8 评审跟进（2026-09-18） ====================
+section('M6-1 投错区拒绝 · M7-1/M7-2 重置确认与完整重置 · M8-1 转义 · M8-2 文案');
+
+test('M6-1 投错区会被拒绝（班组表投进异常表区不再静默"已匹配"）', () => {
+  const groupLike = { fileName: 'g', sheetNames: ['一组'], sheets: { '一组': [GROUP_ROW_HEADERS,
+    [1, '10010001', '张三', '一组', '2026-08-01', '15:45', '2026-08-01', '18:45', 3, 'x', '工作日', '核准']] } };
+  const rectifyLike = rectifyParsed([[1, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '18:45', 1.83, '修改']]);
+  assert.ok(m.tableProblem('dropZoneAbnormal', groupLike).includes('异常表'), '班组表投进异常表区要拒绝');
+  assert.strictEqual(m.tableProblem('dropZoneAbnormal', rectifyLike), '', '整改表含异常表全部列，允许当异常表用');
+  assert.strictEqual(m.tableProblem('dropZone', groupLike), '', '自家表放行');
+  assert.ok(m.tableProblem('dropZone', rectifyLike).includes('班组填报表'), '整改表投进班组表区要拒绝');
+  assert.strictEqual(m.tableProblem('dropZoneRectify', rectifyLike), '', '整改表放行');
+});
+
+test('M7-1「重新开始」会先确认：点取消不清空，确认后才清空', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '15:45', '17:55', 2));
+  const before = appState.mergedRecords.length;
+  confirmAnswer = false;
+  m.startNewRound();
+  assert.strictEqual(appState.mergedRecords.length, before, '点取消不能清空');
+  confirmAnswer = true;
+  m.startNewRound();
+  assert.strictEqual(appState.mergedRecords.length, 0, '确认后才清空');
+});
+
+test('M7-2 重置会把调班视图与解析中标志一起复位', () => {
+  resetState();
+  appState.outputShiftView = 'all';
+  appState.isParsing = true;
+  confirmAnswer = true;
+  m.startNewRound();
+  assert.strictEqual(appState.outputShiftView, 'current', '视图选择要回到默认');
+  assert.strictEqual(appState.isParsing, false, '解析中标志要复位');
+});
+
+test('M8-1 单元格里的 < > & 会被转义（不再当 HTML 渲染）', () => {
+  const html = m.renderTable([{ 工号: '1001', 姓名: '<b>粗体</b>', 加班原因: 'A&B<C>' }]);
+  assert.ok(!html.includes('<b>粗体</b>'), '标签不能被当 HTML 渲染');
+  assert.ok(html.includes('&lt;b&gt;粗体&lt;/b&gt;'), '要原样转义显示');
+  assert.ok(html.includes('A&amp;B&lt;C&gt;'), '& 与 < 都要转义');
+  assert.strictEqual(m.escapeHtml('a"b'), 'a&quot;b', '引号也要转义');
+});
+
+test('M8-2 界面上不再出现「组长」（业务口径是「班组考勤员」）', () => {
+  resetState();
+  appState.mergedRecords = makeMergedRecords();
+  const pages = [m.renderImport(), m.renderRectify(), m.renderOutput()].join('\n');
+  assert.ok(!pages.includes('组长'), '界面文案应统一为「班组考勤员」；仍出现的位置：' + (pages.match(/.{0,20}组长.{0,20}/) || [''])[0]);
 });
 
 // ==================== 汇总 ====================

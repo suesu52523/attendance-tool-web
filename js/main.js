@@ -243,7 +243,7 @@ const demoAbnormal = [
 
 const demoOperations = [
   { 系统序号: 45, 工号: '10010001', 姓名: '张三', 班组: '底盘一组', 操作类型: '修改', 操作详情: '修改后：20260801 18:00-21:00，3h' },
-  { 系统序号: 46, 工号: '10010002', 姓名: '李四', 班组: '前悬一组', 操作类型: '删除', 操作详情: '组长确认重复填报，执行删除' },
+  { 系统序号: 46, 工号: '10010002', 姓名: '李四', 班组: '前悬一组', 操作类型: '删除', 操作详情: '班组考勤员确认重复填报，执行删除' },
   { 系统序号: 47, 工号: '10010003', 姓名: '王五', 班组: '车门一组', 操作类型: '调班', 操作详情: '调班处理：导出至调班模板' },
   { 系统序号: 48, 工号: '10010004', 姓名: '赵六', 班组: '电装一组', 操作类型: '特殊情况', 操作详情: '已口头报备，不做处理' },
 ];
@@ -329,6 +329,16 @@ function getStepHtml(id) {
 
 // ==================== 通用表格渲染 ====================
 
+// M8-1：把数据拼进 HTML 前一律转义（表格 / 文件名 / 清单说明等）。
+// 真数据里暂时没有 < > &（扫过 17 个输入文件 0 格），但值是人工填的，不能靠运气
+function escapeHtml(value) {
+  return String(value === undefined || value === null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function renderTable(rows, options = {}) {
   const { maxRows = 20, emptyText = '暂无数据' } = options;
   if (!rows || rows.length === 0) {
@@ -360,7 +370,7 @@ function renderTable(rows, options = {}) {
                 if (h === '操作类型') {
                   return `<td>${renderOpBadge(val)}</td>`;
                 }
-                return `<td class="${h === '系统序号' || h === '工号' || h === 'ID' ? 'font-medium' : ''}">${val === undefined || val === null ? '-' : val}</td>`;
+                return `<td class="${h === '系统序号' || h === '工号' || h === 'ID' ? 'font-medium' : ''}">${val === undefined || val === null ? '-' : escapeHtml(val)}</td>`;
               }).join('')}
             </tr>
           `).join('')}
@@ -379,12 +389,12 @@ function renderStatusBadge(status) {
   if (s.includes('修改')) return '<span class="badge badge-info">修改</span>';
   if (s.includes('调班')) return '<span class="badge badge-warning">调班</span>';
   if (s.includes('特殊情况')) return '<span class="badge badge-muted">特殊情况</span>';
-  return `<span class="badge badge-muted">${s}</span>`;
+  return `<span class="badge badge-muted">${escapeHtml(s)}</span>`;
 }
 
 function renderOpBadge(type) {
   const cls = getOpBadgeClass(type);
-  return `<span class="badge ${cls}">${type}</span>`;
+  return `<span class="badge ${cls}">${escapeHtml(type)}</span>`;
 }
 
 // 未导入文件时页面展示的是内置示例数据，明确标注避免误读为已导入的真实数据
@@ -1161,7 +1171,7 @@ function renderOverview() {
               <div class="w-8 h-8 rounded-lg bg-apple-green/10 text-apple-green flex items-center justify-center shrink-0"><i class="ph ph-number-circle-three text-lg"></i></div>
               <div>
                 <div class="font-medium text-apple-text">整改与输出</div>
-                <div>支持中间处理输出与最终生成，调班数据按轮次累计</div>
+                <div>支持中间处理输出与最终生成；调班数据在同一会话内按轮次累计（点「重新开始」会清空本次数据）</div>
               </div>
             </div>
           </div>
@@ -1259,7 +1269,7 @@ function renderImport() {
               这类重复会让后续「异常处理 / 整改」按工号+日期+时间定位时出现「多条命中」而需要人工核对，建议先在班组填报表里核对并清理。
             </div>
             <div class="mt-2 space-y-1">
-              ${duplicates.slice(0, 3).map(d => `<div class="text-xs text-apple-muted">· ${d['工号']} ${d['姓名']} ${d['加班开始日期']} ${d['加班开始时间']}：共 ${d['条数']} 条（班组：${d['班组']}）</div>`).join('')}
+              ${duplicates.slice(0, 3).map(d => `<div class="text-xs text-apple-muted">· ${escapeHtml(d['工号'])} ${escapeHtml(d['姓名'])} ${escapeHtml(d['加班开始日期'])} ${escapeHtml(d['加班开始时间'])}：共 ${escapeHtml(d['条数'])} 条（班组：${escapeHtml(d['班组'])}）</div>`).join('')}
               ${duplicates.length > 3 ? `<div class="text-xs text-apple-muted">· 共 ${duplicates.length} 组，其余见下载清单</div>` : ''}
             </div>
           </div>
@@ -1280,7 +1290,7 @@ function renderImport() {
               </div>
               <div class="text-sm font-medium mb-1">拖拽文件到此处</div>
               <div class="text-xs text-apple-muted">或点击选择文件</div>
-              ${hasFile ? `<div class="mt-3 text-xs text-apple-green font-medium">已加载：${appState.fileName}</div>` : ''}
+              ${hasFile ? `<div class="mt-3 text-xs text-apple-green font-medium">已加载：${escapeHtml(appState.fileName)}</div>` : ''}
             </div>
           </div>
 
@@ -1410,7 +1420,7 @@ function renderAbnormal() {
           <i class="ph ph-info mt-0.5 text-lg"></i>
           <div>
             <div class="font-medium">有 ${warnings.length} 条记录需要人工核对</div>
-            <div class="text-apple-muted mt-1">存在同一工号同一天多条加班（需要确认是哪一条），或异常表姓名与合并大表不一致。请在下方「异常记录清单」核对「匹配状态」列，必要时下载定位提醒交由组长确认。</div>
+            <div class="text-apple-muted mt-1">存在同一工号同一天多条加班（需要确认是哪一条），或异常表姓名与合并大表不一致。请在下方「异常记录清单」核对「匹配状态」列，必要时下载定位提醒交由班组考勤员确认。</div>
           </div>
         </div>
         <button onclick="exportAbnormalWarnings()" class="h-9 px-4 rounded-full bg-apple-orange/10 text-apple-orange text-xs font-medium hover:bg-apple-orange/20 transition-colors shrink-0">下载定位提醒</button>
@@ -1432,7 +1442,7 @@ function renderAbnormal() {
               </div>
               <div class="text-sm font-medium mb-1">拖拽异常表到此处</div>
               <div class="text-xs text-apple-muted">或点击选择文件</div>
-              ${hasFile ? `<div class="mt-3 text-xs text-apple-green font-medium">已加载：${appState.abnormalWorkbook.fileName}</div>` : ''}
+              ${hasFile ? `<div class="mt-3 text-xs text-apple-green font-medium">已加载：${escapeHtml(appState.abnormalWorkbook.fileName)}</div>` : ''}
             </div>
           </div>
 
@@ -1509,7 +1519,7 @@ function renderAbnormal() {
             </div>
             <div class="p-4 rounded-2xl bg-apple-gray/50">
               <div class="text-sm text-apple-muted mb-1">下发方式</div>
-              <div class="font-medium">整份文件由组长自行查找</div>
+              <div class="font-medium">整份文件由班组考勤员自行查找</div>
             </div>
           </div>
         </div>
@@ -1543,7 +1553,7 @@ function renderRectify() {
             <h3 class="text-xl font-semibold tracking-tight">导入整改表</h3>
             <span class="badge badge-info">第 ${round.roundNo} 轮</span>
           </div>
-          <p class="text-sm text-apple-muted mb-6">组长填写后发回的整改文件</p>
+          <p class="text-sm text-apple-muted mb-6">班组考勤员填写后发回的整改文件</p>
           <div class="drop-zone border-2 border-dashed border-apple-border rounded-3xl p-8 text-center cursor-pointer bg-apple-gray/30 hover:bg-apple-gray/50" id="dropZoneRectify" data-type="rectify">
             <input type="file" class="hidden file-input" accept=".xlsx,.xls" />
             <div class="zone-content">
@@ -1552,7 +1562,7 @@ function renderRectify() {
               </div>
               <div class="text-sm font-medium mb-1">拖拽整改表到此处</div>
               <div class="text-xs text-apple-muted">或点击选择文件</div>
-              ${hasFile ? `<div class="mt-3 text-xs text-apple-green font-medium">已加载：${appState.rectifyWorkbook.fileName}</div>` : ''}
+              ${hasFile ? `<div class="mt-3 text-xs text-apple-green font-medium">已加载：${escapeHtml(appState.rectifyWorkbook.fileName)}</div>` : ''}
             </div>
           </div>
 
@@ -1611,8 +1621,8 @@ function renderRectify() {
                   <div class="text-sm text-apple-red">有 ${locateIssues.length} 条操作未执行或未能唯一确定目标行（含无法识别的处置方式），请人工核对后再使用导出文件：</div>
                   ${locateIssues.slice(0, 5).map(i => `
                     <div class="p-3 rounded-2xl bg-apple-red/5 border border-apple-red/10 text-xs">
-                      <div class="font-medium text-apple-red">${i['级别']} · ${i['操作类型']} · 工号 ${i['工号']} ${i['姓名']}</div>
-                      <div class="text-apple-muted mt-1">${i['说明']}</div>
+                      <div class="font-medium text-apple-red">${escapeHtml(i['级别'])} · ${escapeHtml(i['操作类型'])} · 工号 ${escapeHtml(i['工号'])} ${escapeHtml(i['姓名'])}</div>
+                      <div class="text-apple-muted mt-1">${escapeHtml(i['说明'])}</div>
                     </div>
                   `).join('')}
                   ${locateIssues.length > 5 ? `<div class="text-xs text-apple-muted">共 ${locateIssues.length} 条，仅显示前 5 条</div>` : ''}
@@ -1851,7 +1861,7 @@ function renderOutput() {
             </div>
           </div>
           <button onclick="startNewRound()" class="w-full mt-6 h-11 rounded-full bg-apple-gray text-sm font-medium hover:bg-gray-200 transition-colors">
-            开始新一轮处理
+            重新开始（清空本次数据）
           </button>
         </div>
       </div>
@@ -1909,8 +1919,8 @@ function renderOutput() {
           <div class="space-y-2">
             ${locateIssues.slice(0, 5).map(i => `
               <div class="p-3 rounded-2xl bg-apple-red/5 text-xs">
-                <div class="font-medium text-apple-red">${i['级别']} · ${i['操作类型']} · 工号 ${i['工号']} ${i['姓名']}（校对ID ${i['校对ID'] || '-'}）</div>
-                <div class="text-apple-muted mt-1">${i['说明']}</div>
+                <div class="font-medium text-apple-red">${escapeHtml(i['级别'])} · ${escapeHtml(i['操作类型'])} · 工号 ${escapeHtml(i['工号'])} ${escapeHtml(i['姓名'])}（校对ID ${escapeHtml(i['校对ID'] || '-')}）</div>
+                <div class="text-apple-muted mt-1">${escapeHtml(i['说明'])}</div>
               </div>
             `).join('')}
             ${locateIssues.length > 5 ? `<div class="text-xs text-apple-muted">共 ${locateIssues.length} 条，仅显示前 5 条</div>` : ''}
@@ -1992,7 +2002,7 @@ function confirmBatch() {
   // —— 宁可拦住，让人确认后再开新一轮
   if (round.status === 'confirmed' || appState.batchConfirmed) {
     // 提示语要与 startNewRound 的真实行为一致：它是整场重置（大表、异常表、整改表、轮次历史都会清空）
-    showToast('本轮批量操作已执行过，不能重复执行。如需重做，请先点「开始新一轮处理」，再按 班组表 → 异常表 → 整改表 重新导入（该按钮会清空本次已导入的数据）', 'error');
+    showToast('本轮批量操作已执行过，不能重复执行。如需重做，请先点「重新开始（清空本次数据）」，再按 班组表 → 异常表 → 整改表 重新导入', 'error');
     return;
   }
 
@@ -2005,7 +2015,7 @@ function confirmBatch() {
 
   // 没有导入整改表时不允许执行（避免把页面上的示例操作当成真实操作执行）
   if (!appState.rectifyOperations.length) {
-    showToast('尚未导入整改表，请先导入组长填好并发回的文件', 'error');
+    showToast('尚未导入整改表，请先导入班组考勤员填好并发回的文件', 'error');
     return;
   }
 
@@ -2169,7 +2179,7 @@ function applyBatchOperations(operations) {
     if (op['操作类型'] === '特殊情况') op['定位状态'] = '无需定位';
   });
 
-  // 无法识别的处置方式（组长写的自由文本，如"删除加班""已改""已调"）不再静默忽略
+  // 无法识别的处置方式（班组考勤员写的自由文本，如"删除加班""已改""已调"）不再静默忽略
   const KNOWN_OPS = ['修改', '删除', '调班', '特殊情况', '未填写'];
   operations.forEach(op => {
     if (KNOWN_OPS.includes(op['操作类型'])) return;
@@ -2230,6 +2240,12 @@ function buildShiftRecords(shiftOps) {
 
 // 开始新一轮处理，重置会话状态
 function startNewRound() {
+  // M7-1：这不是“再来一轮”，是把本次会话整个清空（大表、异常表、整改表、轮次记录）—— 先让人知情
+  if (typeof window !== 'undefined' && typeof window.confirm === 'function'
+    && !window.confirm('这会清空本次已导入的全部数据（班组表、合并大表、异常表、整改表、轮次记录），确定重新开始？')) {
+    showToast('已取消，数据未改动', 'info');
+    return;
+  }
   appState.groupWorkbook = null;
   appState.groupSheets = [];
   appState.mergedRecords = [];
@@ -2244,6 +2260,8 @@ function startNewRound() {
   appState.groupFailures = [];
   appState.abnormalFailures = [];
   appState.groupDuplicates = [];
+  appState.outputShiftView = 'current';   // M7-2：重置漏了这个（调班记录的本轮/累计视图）
+  appState.isParsing = false;             // M7-2：重置漏了这个（解析中标志）
   appState.fileName = '';
   updateStats();
   goToStep(0);
@@ -2600,6 +2618,24 @@ function bindDropZones() {
   });
 }
 
+// M6-1：按区校验“这张表是不是这个区的表”。投错区时直接拒绝 —— 旧行为是取不到定位列后退化成「只按工号匹配」，
+// 结果全部显示「已匹配/多条命中」、失败 0 条，用户以为导入成功了
+const ZONE_TABLE_REQUIREMENTS = {
+  dropZone: { name: '班组填报表', headers: ['工号', '姓名', '加班开始日期', '加班开始时间'] },
+  dropZoneAbnormal: { name: '异常表', headers: ['工号', '开始日期', '开始时间', '上报加班时数'] },
+  dropZoneRectify: { name: '整改表', headers: ['工号', '开始日期', '处置方式'] },
+};
+
+function tableProblem(zoneId, parsed) {
+  const req = ZONE_TABLE_REQUIREMENTS[zoneId];
+  if (!req) return '';
+  const first = (parsed.sheetNames || [])[0];
+  const rows = (parsed.sheets && parsed.sheets[first]) || [];
+  const headers = (rows[0] || []).map(h => String(h === undefined || h === null ? '' : h).trim());
+  const missing = req.headers.filter(h => !headers.includes(h));
+  return missing.length ? `这看起来不是${req.name}（缺少列：${missing.join('、')}）。请确认拖对了文件` : '';
+}
+
 async function handleFile(file, zoneId) {
   const zone = document.getElementById(zoneId);
   const content = zone.querySelector('.zone-content');
@@ -2614,6 +2650,18 @@ async function handleFile(file, zoneId) {
 
   try {
     const parsed = await parseExcel(file);
+    const problem = tableProblem(zoneId, parsed);
+    if (problem) {
+      content.innerHTML = `
+        <div class="w-14 h-14 rounded-2xl bg-apple-red/10 text-apple-red flex items-center justify-center mx-auto mb-4">
+          <i class="ph ph-warning-octagon text-2xl"></i>
+        </div>
+        <div class="text-sm font-medium text-apple-red">文件不对</div>
+        <div class="text-xs text-apple-muted mt-1">${escapeHtml(problem)}</div>
+      `;
+      showToast(problem, 'error');
+      return;
+    }
     appState.fileName = file.name;
 
     if (zoneId === 'dropZone') {
@@ -2633,7 +2681,7 @@ async function handleFile(file, zoneId) {
         <i class="ph ph-x-circle text-2xl"></i>
       </div>
       <div class="text-sm font-medium text-apple-red">解析失败</div>
-      <div class="text-xs text-apple-muted mt-1">${err.message || '请检查文件格式'}</div>
+      <div class="text-xs text-apple-muted mt-1">${escapeHtml(err.message || '请检查文件格式')}</div>
     `;
     showToast('文件解析失败', 'error');
   }
