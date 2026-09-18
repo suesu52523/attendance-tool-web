@@ -1949,6 +1949,13 @@ function confirmBatch() {
     return;
   }
 
+  // 本轮还没导入异常表：《整改表》是从异常表那一步导出来的，跳过它执行 = 拿一份来源不明的表改大表
+  // 真实风险：拿错 / 拿上个月的整改表直接套到本月大表上（改删都不可逆，且无提示）
+  if (!round.abnormalRecords.length) {
+    showToast('本轮还没导入异常表，不能执行。请先完成第 2 步：导入异常表并生成整改表', 'error');
+    return;
+  }
+
   // 没有导入整改表时不允许执行（避免把页面上的示例操作当成真实操作执行）
   if (!appState.rectifyOperations.length) {
     showToast('尚未导入整改表，请先导入组长填好并发回的文件', 'error');

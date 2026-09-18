@@ -677,6 +677,7 @@ test('未填写处置方式标记为「未填写」', () => {
 test('整改表尾部空行不算「未填写」：否则整轮被假阻断', () => {
   resetState();
   appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([[45, '10010001', '张三', '底盘一组', 20260801, '15:45', 20260801, '17:35', 1.83]]));
   m.processRectifyWorkbook(rectifyParsed([
     [45, '10010002', '李四', '底盘一组', 20260802, '07:00', 20260802, '15:00', 8, '删除', '', '', '', '', '', '', '', ''],
     ['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''], // 尾部空行（真实样本 13 号表里就有）
@@ -842,7 +843,8 @@ section('确认执行批量操作');
 
 function setupRound(ops, status = 'pending') {
   appState.rectifyOperations = ops;
-  appState.rounds = [{ roundNo: 1, abnormalRecords: [], abnormalFailures: [], abnormalWarnings: [], rectifyOperations: ops, shiftRecords: [], systemRecords: [], locateIssues: [], status }];
+  // abnormalRecords 放一条占位：模拟「已完成第 2 步（导过异常表）」，M4 的守卫要求本轮导过异常表
+  appState.rounds = [{ roundNo: 1, abnormalRecords: [{ ID: 1 }], abnormalFailures: [], abnormalWarnings: [], rectifyOperations: ops, shiftRecords: [], systemRecords: [], locateIssues: [], status }];
   appState.currentRound = 0;
   appState.batchConfirmed = false;
 }
@@ -1202,6 +1204,7 @@ section('M4 改动执行：调班数据只收「真执行过」的操作');
 test('未定位的调班不进调班数据，但要进定位异常清单', () => {
   resetState();
   appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([[45, '10010001', '张三', '底盘一组', 20260801, '15:45', 20260801, '17:35', 1.83]]));
   m.processRectifyWorkbook(rectifyParsed([
     [11, '10010001', '张三', '底盘一组', '20260809', '15:45', '20260809', '17:35', 1.83, '不处理',
       '', '', '', '', '', '20260809', 'SF04 双班早班', '已发调班表'],
@@ -1216,6 +1219,7 @@ test('未定位的调班不进调班数据，但要进定位异常清单', () =>
 test('已定位的调班照常进调班数据，并把那笔加班从大表拿走', () => {
   resetState();
   appState.mergedRecords = makeMergedRecords();
+  m.processAbnormalWorkbook(abnormalParsed([[45, '10010001', '张三', '底盘一组', 20260801, '15:45', 20260801, '17:35', 1.83]]));
   m.processRectifyWorkbook(rectifyParsed([
     [12, '10010001', '张三', '底盘一组', '20260801', '15:45', '20260801', '17:35', 1.83, '不处理',
       '', '', '', '', '', '20260801', 'SF04 双班早班', '已发调班表'],
@@ -1226,6 +1230,37 @@ test('已定位的调班照常进调班数据，并把那笔加班从大表拿�
   assert.strictEqual(round.shiftRecords[0]['日工作计划'], 'SF04 双班早班');
   assert.strictEqual(round.shiftRecords[0]['开始日期'], '20260801');
   assert.ok(!appState.mergedRecords.some(r => r['工号'] === '10010001'), '调班要把那笔加班从大表拿走');
+});
+
+// ==================== M4：没导异常表不能执行（2026-09-18） ====================
+section('M4 前置守卫：整改表必须来自本轮的异常表');
+
+test('跳过异常表直接执行会被拦住（拿错/拿旧整改表不该动大表）', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '15:45', '17:55', 2));
+  const before = appState.mergedRecords.length;
+  m.processRectifyWorkbook(rectifyParsed([
+    [21, '10010001', '张三', '一组', '20260801', '15:45', '20260801', '17:55', 2, '删除',
+      '', '', '', '', '', '', '', '重复填报'],
+  ]));
+  m.confirmBatch();
+  assert.strictEqual(appState.mergedRecords.length, before, '本轮没导异常表，不允许动大表');
+  assert.notStrictEqual(appState.rounds[appState.currentRound].status, 'confirmed', '不能标记为已执行');
+});
+
+test('按流程走（异常表→整改表）照常执行', () => {
+  resetState();
+  m.processGroupWorkbook(groupWorkbookWithHours('2026-08-01', '15:45', '17:55', 2));
+  m.processAbnormalWorkbook(abnormalParsed([
+    [45, '10010001', '张三', '一组', 20260801, '15:45', 20260801, '17:55', 2],
+  ]));
+  m.processRectifyWorkbook(rectifyParsed([
+    [45, '10010001', '张三', '一组', '20260801', '15:45', '20260801', '17:55', 2, '删除',
+      '', '', '', '', '', '', '', '重复填报'],
+  ]));
+  m.confirmBatch();
+  assert.strictEqual(appState.mergedRecords.length, 0, '正常流程照常执行');
+  assert.strictEqual(appState.rounds[appState.currentRound].status, 'confirmed');
 });
 
 // ==================== 汇总 ====================

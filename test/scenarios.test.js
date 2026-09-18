@@ -286,6 +286,7 @@ test('定位异常不会被改错：实际改动的工号都在整改表里', ()
 test('存在未填写处置方式时整轮阻断，并提示补充', () => {
   resetAll();
   m.processGroupWorkbook(file('01-班组填报-正常.xlsx'));
+  m.processAbnormalWorkbook(file('07-异常表-可匹配.xlsx'));   // 先走第 2 步：确保测的是「未填写」守卫，而不是新的前置守卫
   m.processRectifyWorkbook(file('13-整改表-定位异常.xlsx'));
   const before = snap();
   m.confirmBatch();
