@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="qZaixfsUQbEMbbfLiJx484">
+<head data-page-node-id="PwCDkGwhMDQmb92ThAgdwp">
+  <meta charset="UTF-8" data-page-node-id="YXeGx51A999zf0bjpPAjqX" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="gqVML8sbpQMn3BqQ41x8Ne" />
+  <title>总装科月度加班自动处理工具</title>
+  <link rel="preconnect" href="https://api.fontshare.com" data-page-node-id="syclnWouhBnwH7FCAEempb" />
+  <link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,600,700&display=swap" rel="stylesheet" data-page-node-id="bJlSnLR2VFOTj2YDBOrxEU" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/@phosphor-icons/web"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Satoshi', '-apple-system', 'BlinkMacSystemFont', 'SF Pro Text', 'Segoe UI', 'sans-serif'],
+          },
+          colors: {
+            apple: {
+              bg: '#f5f5f7',
+              card: '#ffffff',
+              text: '#1d1d1f',
+              muted: '#6e6e73',
+              border: 'rgba(0,0,0,0.08)',
+              blue: '#0071e3',
+              'blue-hover': '#0077ed',
+              green: '#34c759',
+              orange: '#ff9500',
+              red: '#ff3b30',
+              gray: '#f2f2f7',
+            },
+          },
+          boxShadow: {
+            'soft': '0 4px 24px rgba(0, 0, 0, 0.04)',
+            'card': '0 1px 2px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.04)',
+          },
+          borderRadius: {
+            '3xl': '1.5rem',
+            '4xl': '2rem',
+          },
+        },
+      },
+    }
+  </script>
+  <link rel="stylesheet" href="css/styles.css" data-page-node-id="v2p7nY3w3ABpOcstGgQ7Ls" />
+</head>
+<body class="bg-apple-bg text-apple-text antialiased h-screen overflow-hidden" data-page-node-id="0OpHDCAwk9gAICissKVqYq">
+
+  <div class="flex h-full" data-page-node-id="4GuTH0GrGm9wsamkxLqFyC">
+    <!-- 左侧导航 -->
+    <aside class="w-[280px] bg-apple-card border-r border-apple-border flex flex-col shrink-0" data-page-node-id="4yZEJGGMs7l5Ti8Cr2j4vx">
+      <div class="p-8 pb-6" data-page-node-id="AEomhdfPynxEcPaxclgld9">
+        <div class="flex items-center gap-3 mb-2" data-page-node-id="4QFTogMWwwIAXeInfpHJdR">
+          <div class="w-10 h-10 rounded-2xl bg-apple-blue flex items-center justify-center text-white" data-page-node-id="DePBUMOFge9fNEKiyi9Cme">
+            <i class="ph ph-clock-afternoon text-xl" data-page-node-id="y5dqnQIyzxRe8Pof7CSuI2"></i>
+          </div>
+          <div data-page-node-id="3VNqCYgM7kGDaAnfV18J61">
+            <h1 class="font-semibold text-lg leading-tight tracking-tight" data-page-node-id="XvFPxeBsATSO8u4PvBPWtH">加班处理工具</h1>
+            <p class="text-xs text-apple-muted" data-page-node-id="Kw5zgN1VkXDBFm408ciRfL">总装科月度考勤</p>
+          </div>
+        </div>
+      </div>
+
+      <nav class="flex-1 px-5 py-2 space-y-1" id="stepNav" data-page-node-id="qusBw1S6x9by5CSrQGguQj">
+        <!-- 步骤按钮由 JS 生成 -->
+      </nav>
+
+      <div class="p-6 border-t border-apple-border" data-page-node-id="ak85zCCUQGvjccapQzMtUn">
+        <div class="rounded-3xl bg-apple-gray p-5" data-page-node-id="Oa00Nv0sHPFTf1w1ydK7uc">
+          <div class="flex items-center gap-2 mb-3" data-page-node-id="6uHimnsQHTABqpl3hCN4bS">
+            <div class="w-2 h-2 rounded-full bg-apple-green animate-pulse" data-page-node-id="WD1Qo0zz2vj0ANe4A4L1k7"></div>
+            <span class="text-sm font-medium" data-page-node-id="hTRWcHK1uHGII6fN5OhVpE">当前会话</span>
+          </div>
+          <div class="space-y-2 text-xs text-apple-muted" data-page-node-id="rLxv5jJYAiKtGA6GY1ejNA">
+            <div class="flex justify-between" data-page-node-id="aDKkRkMdGVoxCYg0bdgs8f">
+              <span data-page-node-id="fxpWl5YmAoVADNcNWnCYGQ">总记录</span>
+              <span class="font-medium text-apple-text" id="statTotal" data-page-node-id="jvMPNpmnUElqicGNh43NF1">0</span>
+            </div>
+            <div class="flex justify-between" data-page-node-id="yibHKuloxxeT2Z4mWNpV0e">
+              <span data-page-node-id="CJTwHpx6bb1tEzyEHu6f6V">累计删除</span>
+              <span class="font-medium text-apple-text" id="statCumulativeDelete" data-page-node-id="pH6ipkCVqffPZTXd8uAdHa">0</span>
+            </div>
+            <div class="flex justify-between" data-page-node-id="5NMsRwiAmkBC87J6lCde4c">
+              <span data-page-node-id="bMx0a9dI3QjNDTQw4uAbUz">累计调班</span>
+              <span class="font-medium text-apple-text" id="statCumulativeShift" data-page-node-id="wglpNoj8GDQEdodAofziF5">0</span>
+            </div>
+            <div class="pt-2 mt-2 border-t border-apple-border" data-page-node-id="statusLineWrap">
+              <div class="text-xs text-apple-muted mb-1">当前工作状态</div>
+              <div class="text-sm font-medium text-apple-text leading-tight" id="statWorkingStatus">待导入班组表</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 右侧主区域 -->
+    <main class="flex-1 flex flex-col min-w-0" data-page-node-id="0CAUXLDeW6FYpv8L2mqtHM">
+      <!-- 顶部标题栏 -->
+      <header class="h-20 px-10 flex items-center justify-between bg-apple-bg/80 backdrop-blur-xl sticky top-0 z-10" data-page-node-id="r1SGYd4sKDqZQ6R9lJz1kt">
+        <div data-page-node-id="2M4QxoBd03IsugBrIYKJJl">
+          <h2 class="text-2xl font-semibold tracking-tight" id="pageTitle" data-page-node-id="TRK8GfBsGQwSz00fLje5ku">流程总览</h2>
+          <p class="text-sm text-apple-muted mt-0.5" id="pageSubtitle" data-page-node-id="6N92dQmkBhf9ANvhn9Ccuy">查看本月加班数据处理全流程</p>
+        </div>
+      </header>
+
+      <!-- 内容区 -->
+      <div class="flex-1 overflow-y-auto px-10 pb-10" id="contentArea" data-page-node-id="tqNi0ujjssXZRJpEgcqdvN">
+        <!-- 步骤内容由 JS 渲染 -->
+      </div>
+    </main>
+  </div>
+
+  <!-- 隐藏的文件选择器 -->
+  <input type="file" id="hiddenFileInput" accept=".xlsx,.xls" class="hidden" />
+
+  <script src="js/main.js?v=20260915-5"></script>
+</body>
+</html>
